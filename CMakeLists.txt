@@ -84,7 +84,7 @@ if(NUKEDENGINE_BUILD_SHARED)
 
     if(MSVC)
         target_sources(NukedEngineApi PRIVATE src/NukedEngineApi.def)
-        target_compile_options(NukedEngineApi PRIVATE /W3 /O2)
+        target_compile_options(NukedEngineApi PRIVATE /W3 /O0 /utf-8)
     else()
         target_compile_options(NukedEngineApi PRIVATE -Wall -O2)
     endif()
@@ -117,6 +117,10 @@ if(NUKEDENGINE_BUILD_STATIC)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
         POSITION_INDEPENDENT_CODE ON
     )
+    if(MSVC)
+        target_compile_options(NukedEngineApi_static PRIVATE /W3 /O0 /utf-8)
+    endif()
+
     install(TARGETS NukedEngineApi_static ARCHIVE DESTINATION lib)
 endif()
 
@@ -135,6 +139,9 @@ if(NUKEDENGINE_BUILD_EXAMPLE)
     set_target_properties(sample_app PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     )
+    if(MSVC)
+        target_compile_options(sample_app PRIVATE /utf-8)
+    endif()
     if(UNIX)
         target_link_libraries(sample_app PRIVATE m)
     endif()

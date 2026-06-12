@@ -1,0 +1,21 @@
+; NukedEngineApi.def
+; MSVC エクスポート定義ファイル
+; FmEngineApi.def と同一の関数名でエクスポートする。
+
+LIBRARY NukedEngineApi
+
+EXPORTS
+    FmEngine_Create
+    FmEngine_Destroy
+    FmEngine_AddChip
+    FmEngine_GetChipName
+    FmEngine_GetNativeRate
+    FmEngine_GetSampleRate
+    FmEngine_Write
+    FmEngine_SetGain
+    FmEngine_GetGain
+    FmEngine_Generate
+    Wasapi_Create
+    Wasapi_Destroy
+    Wasapi_Start
+    Wasapi_Stop

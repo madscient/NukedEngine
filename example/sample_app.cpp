@@ -2,62 +2,13 @@
 //
 // NukedEngineApi の使用例。
 // YMEngine の main.cpp と同じ API のみ使用し、互換性を示す。
+// WASAPI でリアルタイム再生する。Enter キーで終了。
 
 #include "NukedEngineApi.h"
 #include <cstdio>
-#include <cstring>
-#include <vector>
-#include <cstdlib>
 
 // ------------------------------------------------------------
-// 簡易 WAV ファイル書き出しヘルパー
-// ------------------------------------------------------------
-static void write_wav(const char* path, const float* l, const float* r,
-                      uint32_t frames, uint32_t sr)
-{
-    FILE* f = fopen(path, "wb");
-    if (!f) { fprintf(stderr, "Cannot open %s\n", path); return; }
-
-    uint32_t data_bytes = frames * 2 * sizeof(int16_t);
-    uint32_t riff_size  = 36 + data_bytes;
-    uint16_t ch = 2, bits = 16;
-    uint32_t byte_rate = sr * ch * bits / 8;
-    uint16_t block_align = static_cast<uint16_t>(ch * bits / 8);
-
-    // RIFF ヘッダ
-    fwrite("RIFF", 1, 4, f);
-    fwrite(&riff_size, 4, 1, f);
-    fwrite("WAVE", 1, 4, f);
-    // fmt チャンク
-    fwrite("fmt ", 1, 4, f);
-    uint32_t fmt_size = 16;
-    uint16_t pcm = 1;
-    fwrite(&fmt_size, 4, 1, f);
-    fwrite(&pcm, 2, 1, f);
-    fwrite(&ch, 2, 1, f);
-    fwrite(&sr, 4, 1, f);
-    fwrite(&byte_rate, 4, 1, f);
-    fwrite(&block_align, 2, 1, f);
-    fwrite(&bits, 2, 1, f);
-    // data チャンク
-    fwrite("data", 1, 4, f);
-    fwrite(&data_bytes, 4, 1, f);
-    for (uint32_t i = 0; i < frames; ++i) {
-        auto to16 = [](float v) -> int16_t {
-            int32_t x = static_cast<int32_t>(v * 32767.0f);
-            if (x >  32767) x =  32767;
-            if (x < -32768) x = -32768;
-            return static_cast<int16_t>(x);
-        };
-        int16_t s[2] = { to16(l[i]), to16(r[i]) };
-        fwrite(s, 2, 2, f);
-    }
-    fclose(f);
-    printf("  Wrote: %s  (%u frames @ %u Hz)\n", path, frames, sr);
-}
-
-// ------------------------------------------------------------
-// OPL3 デモ – YMEngineのmain.cppと同形のコード
+// OPL3 デモ
 // ------------------------------------------------------------
 static void demo_opl3(FmEngineHandle eng)
 {
@@ -70,10 +21,10 @@ static void demo_opl3(FmEngineHandle eng)
            FmEngine_GetNativeRate(eng, id));
     FmEngine_SetGain(eng, id, 0.7f, 0.7f);
 
-    // OPL3 モード有効化 (port=1 でバンク 1 アドレス空間へ)
+    // OPL3 モード有効化
     FmEngine_Write(eng, id, 0x05, 0x01, 1);
 
-    // スロット 0 / チャンネル 0 のオペレーター設定
+    // CH0 オペレーター設定
     FmEngine_Write(eng, id, 0x20, 0x01, 0); // Modulator AM/VIB/EG/KSR/MULT
     FmEngine_Write(eng, id, 0x40, 0x10, 0); // Modulator KSL/TL
     FmEngine_Write(eng, id, 0x60, 0xF0, 0); // Modulator AR/DR
@@ -83,7 +34,7 @@ static void demo_opl3(FmEngineHandle eng)
     FmEngine_Write(eng, id, 0x63, 0xF0, 0);
     FmEngine_Write(eng, id, 0x83, 0x77, 0);
 
-    // チャンネル 0 F-num (440 Hz 相当) + Key-On
+    // CH0 F-num (440 Hz 相当) + Key-On
     FmEngine_Write(eng, id, 0xA0, 0x49, 0);
     FmEngine_Write(eng, id, 0xB0, 0x32, 0); // Key-On
     FmEngine_Write(eng, id, 0xC0, 0x31, 0); // stereo
@@ -103,13 +54,11 @@ static void demo_opn2(FmEngineHandle eng)
            FmEngine_GetNativeRate(eng, id));
     FmEngine_SetGain(eng, id, 0.7f, 0.7f);
 
-    // CH1: アルゴリズム 7, FB=0 (port=0:addr, port=1:data)
-    FmEngine_Write(eng, id, 0xB0, 0x07, 0); // addr
-    FmEngine_Write(eng, id, 0x00, 0x07, 1); // data: ALG=7
-    // OP1 TL=0
+    // CH0: ALG=7, TL=0, Key-On 全 OP
+    FmEngine_Write(eng, id, 0xB0, 0x07, 0);
+    FmEngine_Write(eng, id, 0x00, 0x07, 1);
     FmEngine_Write(eng, id, 0x40, 0x00, 0);
     FmEngine_Write(eng, id, 0x00, 0x00, 1);
-    // Key-On CH0 全 OP
     FmEngine_Write(eng, id, 0x28, 0xF0, 0);
     FmEngine_Write(eng, id, 0x00, 0xF0, 1);
 }
@@ -128,16 +77,15 @@ static void demo_opm(FmEngineHandle eng)
            FmEngine_GetNativeRate(eng, id));
     FmEngine_SetGain(eng, id, 0.6f, 0.6f);
 
-    // CH0 RL/FB/CON (port=0:addr, port=1:data)
+    // CH0 RL/FB/CON, Key-On 全 OP
     FmEngine_Write(eng, id, 0x20, 0xC0, 0);
     FmEngine_Write(eng, id, 0x20, 0xC0, 1);
-    // Key-On 全 OP
     FmEngine_Write(eng, id, 0x08, 0x78, 0);
     FmEngine_Write(eng, id, 0x08, 0x78, 1);
 }
 
 // ------------------------------------------------------------
-// OPLL デモ (拡張チップ)
+// OPLL デモ
 // ------------------------------------------------------------
 static void demo_opll(FmEngineHandle eng)
 {
@@ -160,13 +108,13 @@ static void demo_opll(FmEngineHandle eng)
 }
 
 // ------------------------------------------------------------
-// PSG デモ (拡張チップ)
+// PSG デモ (FM_CHIP_EXT_DCSG → Nuked-PSG / YM7101)
 // ------------------------------------------------------------
 static void demo_psg(FmEngineHandle eng)
 {
     uint32_t id;
-    if (FmEngine_AddChip(eng, FM_CHIP_PSG, 0, &id) != FM_OK) {
-        fprintf(stderr, "[PSG] AddChip failed\n"); return;
+    if (FmEngine_AddExtChip(eng, FM_CHIP_EXT_DCSG, 0, &id) != FM_OK) {
+        fprintf(stderr, "[PSG] AddExtChip failed\n"); return;
     }
     printf("[PSG]  %s  native=%u Hz\n",
            FmEngine_GetChipName(eng, id),
@@ -184,56 +132,50 @@ static void demo_psg(FmEngineHandle eng)
 // ------------------------------------------------------------
 int main()
 {
+    printf("NukedEngine sample_app (YMEngine-compatible API)\n\n");
+
+    // --- エンジン作成 (WASAPI がデバイスのサンプルレートで動作するため 0 で作成後、
+    //     Wasapi_Create → Wasapi_GetSampleRate で実際のレートを取得する。
+    //     ここでは一般的な 48000 Hz を仮定して初期化する) ---
     const uint32_t SAMPLE_RATE = 48000;
-    const uint32_t DURATION    = 2;   // 秒
-    const uint32_t FRAMES      = SAMPLE_RATE * DURATION;
-    const uint32_t BLOCK       = 512;
-
-    printf("NukedEngine sample_app (YMEngine-compatible API)\n");
-    printf("Sample rate: %u Hz,  Duration: %u s\n\n", SAMPLE_RATE, DURATION);
-
-    // --- エンジン作成 ---
     FmEngineHandle eng = FmEngine_Create(SAMPLE_RATE);
     if (!eng) { fprintf(stderr, "FmEngine_Create failed\n"); return 1; }
 
-    // --- チップ追加 ---
+    // --- チップ追加・レジスタ設定 ---
     demo_opl3(eng);
     demo_opn2(eng);
     demo_opm(eng);
     demo_opll(eng);
     demo_psg(eng);
 
-    // --- 音声生成 → WAV 書き出し ---
-    std::vector<float> out_l(FRAMES), out_r(FRAMES);
-    uint32_t written = 0;
-    while (written < FRAMES) {
-        uint32_t n = std::min(BLOCK, FRAMES - written);
-        FmEngine_Generate(eng, out_l.data() + written, out_r.data() + written, n);
-        written += n;
+    printf("\nEngine sample rate : %u Hz\n", FmEngine_GetSampleRate(eng));
+
+    // --- WASAPI 出力作成 (Shared mode) ---
+    WasapiHandle wasapi = Wasapi_Create(eng, 0);
+    if (!wasapi) {
+        fprintf(stderr, "Wasapi_Create failed\n");
+        FmEngine_Destroy(eng);
+        return 1;
+    }
+    printf("WASAPI sample rate : %u Hz\n", Wasapi_GetSampleRate(wasapi));
+
+    // --- 再生開始 ---
+    FmResult hr = Wasapi_Start(wasapi);
+    if (hr != FM_OK) {
+        fprintf(stderr, "Wasapi_Start failed (%d)\n", hr);
+        Wasapi_Destroy(wasapi);
+        FmEngine_Destroy(eng);
+        return 1;
     }
 
-    // クリッピング防止: 全チップ合算後にソフトリミット
-    for (uint32_t i = 0; i < FRAMES; ++i) {
-        auto soft = [](float v) {
-            if (v >  1.0f) v =  1.0f;
-            if (v < -1.0f) v = -1.0f;
-            return v;
-        };
-        out_l[i] = soft(out_l[i]);
-        out_r[i] = soft(out_r[i]);
-    }
+    printf("\nPlaying... Press Enter to stop.\n");
+    getchar();
 
-    write_wav("nuked_output.wav", out_l.data(), out_r.data(), FRAMES, SAMPLE_RATE);
-
-    // --- ゲイン確認 ---
-    float gl, gr;
-    uint32_t chip0_id = 0;
-    FmEngine_GetGain(eng, chip0_id, &gl, &gr);
-    printf("[Info] chip#0 gain L=%.2f R=%.2f\n", gl, gr);
-    printf("[Info] engine sample_rate=%u\n", FmEngine_GetSampleRate(eng));
-
-    // --- 後始末 ---
+    // --- 停止・後始末 ---
+    Wasapi_Stop(wasapi);
+    Wasapi_Destroy(wasapi);
     FmEngine_Destroy(eng);
-    printf("\nDone.\n");
+
+    printf("Done.\n");
     return 0;
 }

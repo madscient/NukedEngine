@@ -108,13 +108,16 @@ typedef enum FmMemoryType {
 //  ※ MSVC C2143 回避のため extern "C" の外で定義
 // =========================================================
 typedef enum FmChipTypeNuked {
-    FM_NUKED_OPN2_YM3438  = 0x200,  // YM3438  (Nuked-OPN2, YM3438 mode)
-    FM_NUKED_OPP          = 0x201,  // YM2164  (Nuked-OPM, OPP flag)
-    FM_NUKED_OPLL_YM2413B = 0x202,  // YM2413B (Nuked-OPLL)
-    FM_NUKED_OPLL_YMF281  = 0x203,  // YMF281  (Nuked-OPLL)
-    FM_NUKED_OPLL_YMF281B = 0x204,  // YMF281B (Nuked-OPLL)
-    FM_NUKED_OPLL_YM2420  = 0x205,  // YM2420  (Nuked-OPLL)
-    FM_NUKED_PSG          = 0x206,  // YM7101  (Nuked-PSG / Sega Mega Drive)
+    FM_NUKED_OPN2C    = 0x200,  // YM3438     (Nuked-OPN2, YM3438 mode)
+    FM_NUKED_OPP      = 0x201,  // YM2164     (Nuked-OPM, OPP flag)
+    FM_NUKED_OPLLP_B  = 0x202,  // YMF281B    (Nuked-OPLL) ※FM_CHIP_OPLLP(YMF281) の B バリアント
+    FM_NUKED_OPLL2    = 0x203,  // YM2420     (Nuked-OPLL) ※FmChipType に存在しない亜種
+    FM_NUKED_OPLL_B   = 0x204,  // YM2413B    (Nuked-OPLL) ※opll_type_ym2413b は ym2413 と内部処理が異なる
+    // 以下は FmChipType / FmChipTypeExt と機能重複のため廃止:
+    //   FM_CHIP_OPLL  (=11) → YM2413  (opll_type_ym2413)
+    //   FM_CHIP_OPLLP (=12) → YMF281  (opll_type_ymf281)
+    //   FM_CHIP_OPLLX (=13) → YM2423  (opll_type_ym2423)
+    //   FM_CHIP_EXT_DCSG(=101) → SN76489/PSG
 } FmChipTypeNuked;
 
 // =========================================================
@@ -141,7 +144,9 @@ FMENGINE_API void           FMENGINE_CALL FmEngine_Destroy(FmEngineHandle engine
 FMENGINE_API FmResult       FMENGINE_CALL FmEngine_AddChip(
     FmEngineHandle engine, FmChipType type, uint32_t clock, uint32_t* out_id);
 
-// 外部ライブラリチップ追加 (NukedEngine では未サポート → FM_ERR_INVALID_ARG)
+// 外部ライブラリチップ追加
+// FM_CHIP_EXT_DCSG のみサポート (Nuked-PSG / YM7101 をバックエンドとして使用)
+// FM_CHIP_EXT_SSG / FM_CHIP_EXT_SCC / FM_CHIP_EXT_SAA は FM_ERR_INVALID_ARG を返す
 FMENGINE_API FmResult       FMENGINE_CALL FmEngine_AddExtChip(
     FmEngineHandle engine, FmChipTypeExt type, uint32_t clock, uint32_t* out_id);
 

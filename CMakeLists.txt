@@ -85,7 +85,7 @@ if(NUKEDENGINE_BUILD_SHARED)
     if(MSVC)
         target_sources(NukedEngineApi PRIVATE src/NukedEngineApi.def)
         target_compile_options(NukedEngineApi PRIVATE /W3 /utf-8
-            $<$<NOT:$<CONFIG:Release>>:/O0 /RTC1>
+            $<$<CONFIG:Debug>:/O0 /RTC1>
             $<$<CONFIG:Release>:/O2>
         )
     else()
@@ -122,7 +122,7 @@ if(NUKEDENGINE_BUILD_STATIC)
     )
     if(MSVC)
         target_compile_options(NukedEngineApi_static PRIVATE /W3 /utf-8
-            $<$<NOT:$<CONFIG:Release>>:/O0 /RTC1>
+            $<$<CONFIG:Debug>:/O0 /RTC1>
             $<$<CONFIG:Release>:/O2>
         )
     endif()
@@ -146,10 +146,7 @@ if(NUKEDENGINE_BUILD_EXAMPLE)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     )
     if(MSVC)
-        target_compile_options(sample_app PRIVATE /utf-8
-            $<$<NOT:$<CONFIG:Release>>:/O0 /RTC1>
-            $<$<CONFIG:Release>:/O2>
-        )
+        target_compile_options(sample_app PRIVATE /utf-8)
     endif()
     if(UNIX)
         target_link_libraries(sample_app PRIVATE m)

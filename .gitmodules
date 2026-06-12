@@ -1,23 +1,23 @@
 [submodule "cores/opl3"]
 	path = cores/opl3
-	url = https://github.com/nukeykt/Nuked-OPL3.git
+	url = https://github.com/nukeykt/Nuked-OPL3
 
 [submodule "cores/opl2"]
 	path = cores/opl2
-	url = https://github.com/nukeykt/Nuked-OPL2-Lite.git
+	url = https://github.com/nukeykt/Nuked-OPL2-Lite
 
 [submodule "cores/opn2"]
 	path = cores/opn2
-	url = https://github.com/nukeykt/Nuked-OPN2.git
+	url = https://github.com/nukeykt/Nuked-OPN2
 
 [submodule "cores/opm"]
 	path = cores/opm
-	url = https://github.com/nukeykt/Nuked-OPM.git
+	url = https://github.com/nukeykt/Nuked-OPM
 
 [submodule "cores/opll"]
 	path = cores/opll
-	url = https://github.com/nukeykt/Nuked-OPLL.git
+	url = https://github.com/nukeykt/Nuked-OPLL
 
 [submodule "cores/psg"]
 	path = cores/psg
-	url = https://github.com/nukeykt/Nuked-PSG.git
+	url = https://github.com/nukeykt/Nuked-PSG

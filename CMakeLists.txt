@@ -116,7 +116,7 @@ if(NUKEDENGINE_BUILD_STATIC)
     target_include_directories(NukedEngineApi_static PRIVATE ${ENGINE_INCLUDES})
     target_compile_definitions(NukedEngineApi_static PRIVATE NUKEDENGINE_STATIC)
     set_target_properties(NukedEngineApi_static PROPERTIES
-        OUTPUT_NAME NukedEngineApi
+        OUTPUT_NAME NukedEngineApi_s    # DLL インポートライブラリ (NukedEngineApi.lib) と衝突しないよう "_s" を付ける
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
         POSITION_INDEPENDENT_CODE ON
     )
@@ -134,8 +134,19 @@ endif()
 # 使用例
 # -----------------------------------------------------------------------
 if(NUKEDENGINE_BUILD_EXAMPLE)
+    # nlohmann/json (header-only) を FetchContent で取得
+    include(FetchContent)
+    FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG        v3.11.3
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(nlohmann_json)
+
     add_executable(sample_app example/sample_app.cpp)
     target_include_directories(sample_app PRIVATE include)
+    target_link_libraries(sample_app PRIVATE nlohmann_json::nlohmann_json)
     if(NUKEDENGINE_BUILD_SHARED)
         target_link_libraries(sample_app PRIVATE NukedEngineApi)
     elseif(NUKEDENGINE_BUILD_STATIC)
@@ -151,4 +162,12 @@ if(NUKEDENGINE_BUILD_EXAMPLE)
     if(UNIX)
         target_link_libraries(sample_app PRIVATE m)
     endif()
+
+    # patches フォルダをビルド出力先にコピー
+    add_custom_command(TARGET sample_app POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/example/patches"
+            "$<TARGET_FILE_DIR:sample_app>/patches"
+        COMMENT "Copying patches to output directory"
+    )
 endif()

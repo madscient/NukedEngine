@@ -188,7 +188,7 @@ static uint32_t nativeRate(NukedTag t, uint32_t clk, uint32_t target_sr) {
         case NukedTag::OPL2:
         case NukedTag::OPL3:    return target_sr;  // 内蔵リサンプラー使用
         case NukedTag::OPN2_YM2612:
-        case NukedTag::OPN2C: return clk / 24;
+        case NukedTag::OPN2C: return clk / 144;  // 6マスタークロック×24クロック=144
         case NukedTag::OPM:
         case NukedTag::OPP:     return clk / 64;
         case NukedTag::OPLL:
@@ -272,13 +272,16 @@ struct ChipSlot {
     void flush() {
         size_t t = q_tail.load(std::memory_order_relaxed);
         while (t != q_head.load(std::memory_order_acquire)) {
-            write_now(q_buf[t].reg, q_buf[t].value, q_buf[t].port);
+            auto& e = q_buf[t];
+            write_direct(e.reg, e.value, e.port);
             t = (t + 1) % Q_CAP;
         }
         q_tail.store(t, std::memory_order_release);
     }
 
-    void write_now(uint8_t reg, uint8_t value, uint32_t port) {
+    // シフトレジスタを完全にバイパスして内部状態に直接書き込む
+    // write_a_en/write_d_en が立った状態を再現する
+    void write_direct(uint8_t reg, uint8_t value, uint32_t port) {
         switch (tag) {
         case NukedTag::OPL3: {
             uint16_t full = static_cast<uint16_t>((port & 1u) << 8 | reg);
@@ -290,11 +293,56 @@ struct ChipSlot {
             break;
         case NukedTag::OPN2_YM2612:
         case NukedTag::OPN2C:
-            OPN2_Write(&state.opn2, port & 0x3u, value);
+            // write_a/write_d を直接セットして1クロックずつ回す
+            // これによりシフトレジスタの write_data 共有問題を回避
+            {
+                uint8_t bank = (port & 0x02) ? 3 : 1; // bank0=0x01, bank1=0x03
+                state.opn2.write_data = reg;
+                state.opn2.write_a = bank;
+                {
+                    int16_t dummy[2]{};
+                    OPN2_Clock(&state.opn2, dummy);
+                }
+                state.opn2.write_data = value;
+                state.opn2.write_d = 0x01;
+                {
+                    int16_t dummy[2]{};
+                    OPN2_Clock(&state.opn2, dummy);
+                }
+            }
             break;
         case NukedTag::OPM:
         case NukedTag::OPP:
-            OPM_Write(&state.opm, port, value);
+            // シフトレジスタをバイパス: write_a_en と write_d_en を直接セット
+            state.opm.write_data = reg;
+            state.opm.write_a = 0x01;  // 次クロックで write_a_en = true
+            // アドレスを先に確定させてからデータを書く
+            // → write_a をフルセットして即時 write_a_en にする
+            state.opm.write_a_en = 1;
+            state.opm.write_d_en = 0;
+            // OPM_DoIO の処理を模倣してアドレスを確定
+            // opm.cのOPM_DoModeWrite/OPM_DoRegWriteを直接呼ぶ代わりに
+            // write_busy_cnt をリセットして通常の OPM_Write シーケンスを使う
+            // ただしクロックを挟まず write_data を分離して設定
+            state.opm.write_a_en = 0;
+            state.opm.write_d_en = 0;
+            // write_a=0x01, write_data=reg の状態でOPM_Clockを1回回せば
+            // write_a_en=true になるので、それを直接セットして処理
+            state.opm.write_data = reg;
+            state.opm.write_a    = 0x01;
+            // 1クロック相当の処理（アドレス確定）
+            {
+                int32_t dummy[2]{};
+                OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);
+            }
+            // データをセット
+            state.opm.write_data = value;
+            state.opm.write_d    = 0x01;
+            // 1クロック相当の処理（データ確定）
+            {
+                int32_t dummy[2]{};
+                OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);
+            }
             break;
         case NukedTag::OPLL:
         case NukedTag::OPLL_B:
@@ -303,7 +351,19 @@ struct ChipSlot {
         case NukedTag::OPLL2:
         case NukedTag::OPLL_YM2423:
         case NukedTag::OPLL_VRC7:
-            OPLL_Write(&state.opll, port, value);
+            // OPLLも同様
+            state.opll.write_data = reg;
+            state.opll.write_a    = 0x01;
+            {
+                int32_t dummy[2]{};
+                OPLL_Clock(&state.opll, dummy);
+            }
+            state.opll.write_data = value;
+            state.opll.write_d    = 0x01;
+            {
+                int32_t dummy[2]{};
+                OPLL_Clock(&state.opll, dummy);
+            }
             break;
         case NukedTag::PSG:
             YMPSG_Write(&state.psg, value);
@@ -330,14 +390,16 @@ struct ChipSlot {
             break;
         case NukedTag::OPN2_YM2612:
         case NukedTag::OPN2C:
+            // 1サンプル = 24クロック (6マスタークロック×24 = 144マスタークロック)
             for (uint32_t i = 0; i < n; ++i) {
                 int16_t buf[2]{};
-                for (int c = 0; c < 4; ++c) OPN2_Clock(&state.opn2, buf);
+                for (int c = 0; c < 24; ++c) OPN2_Clock(&state.opn2, buf);
                 l[i] = buf[0] * S15; r[i] = buf[1] * S15;
             }
             break;
         case NukedTag::OPM:
         case NukedTag::OPP:
+            // 1サンプル = 64クロック
             for (uint32_t i = 0; i < n; ++i) {
                 int32_t out[2]{};
                 for (int c = 0; c < 64; ++c) OPM_Clock(&state.opm, out, nullptr, nullptr, nullptr);
@@ -352,6 +414,7 @@ struct ChipSlot {
         case NukedTag::OPLL2:
         case NukedTag::OPLL_YM2423:
         case NukedTag::OPLL_VRC7:
+            // 1サンプル = 72クロック
             for (uint32_t i = 0; i < n; ++i) {
                 int32_t out[2]{};
                 for (int c = 0; c < 72; ++c) OPLL_Clock(&state.opll, out);

@@ -21,3 +21,8 @@
 [submodule "cores/psg"]
 	path = cores/psg
 	url = https://github.com/nukeykt/Nuked-PSG.git
+
+[submodule "deps/json"]
+	path = deps/json
+	url = https://github.com/nlohmann/json.git
+	branch = v3.11.3

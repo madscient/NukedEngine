@@ -47,6 +47,15 @@ foreach(_core opl3/opl3.h opl2/opl2.h opn2/ym3438.h opm/opm.h opll/opll.h psg/ym
     endif()
 endforeach()
 
+if(NUKEDENGINE_BUILD_EXAMPLE)
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/json/single_include/nlohmann/json.hpp")
+        message(FATAL_ERROR
+            "nlohmann/json submodule not found: deps/json\n"
+            "Please run:\n"
+            "  git submodule update --init --recursive")
+    endif()
+endif()
+
 # -----------------------------------------------------------------------
 # Nuked コアソース (git submodule として cores/ 以下に配置)
 # -----------------------------------------------------------------------
@@ -134,19 +143,11 @@ endif()
 # 使用例
 # -----------------------------------------------------------------------
 if(NUKEDENGINE_BUILD_EXAMPLE)
-    # nlohmann/json (header-only) を FetchContent で取得
-    include(FetchContent)
-    FetchContent_Declare(
-        nlohmann_json
-        GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG        v3.11.3
-        GIT_SHALLOW    TRUE
-    )
-    FetchContent_MakeAvailable(nlohmann_json)
+    # nlohmann/json: deps/json サブモジュールの single_include を使用
+    set(NLOHMANN_JSON_INCLUDE "${CMAKE_SOURCE_DIR}/deps/json/single_include")
 
     add_executable(sample_app example/sample_app.cpp)
-    target_include_directories(sample_app PRIVATE include)
-    target_link_libraries(sample_app PRIVATE nlohmann_json::nlohmann_json)
+    target_include_directories(sample_app PRIVATE include "${NLOHMANN_JSON_INCLUDE}")
     if(NUKEDENGINE_BUILD_SHARED)
         target_link_libraries(sample_app PRIVATE NukedEngineApi)
     elseif(NUKEDENGINE_BUILD_STATIC)

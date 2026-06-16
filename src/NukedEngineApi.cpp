@@ -279,8 +279,29 @@ struct ChipSlot {
         q_tail.store(t, std::memory_order_release);
     }
 
-    // シフトレジスタを完全にバイパスして内部状態に直接書き込む
-    // write_a_en/write_d_en が立った状態を再現する
+    // シフトレジスタを使わずにレジスタ書き込みを確定させる
+    // 各チップの Clock 内での DoIO/DoRegWrite 実行順序に基づく正確な実装:
+    //
+    // OPN2: DoIO → DoRegWrite の順。Write後1クロックで確定。
+    //   Write(0,reg): write_a|=1, write_data=((bank<<7)&0x100)|reg
+    //   Clock1: DoIO: write_a_en=true, write_a<<=1
+    //           DoRegWrite: write_a_en=true → アドレス確定
+    //   Write(1,val): write_d|=1, write_data=val
+    //   Clock2: DoIO: write_d_en=true, write_d<<=1
+    //           DoRegWrite: write_d_en=true → データ確定
+    //
+    // OPM: DoRegWrite → DoIO の順。Write後2クロックで確定。
+    //   Write(0,reg): write_a=1, write_data=reg
+    //   Clock1: DoRegWrite: write_a_en=0 → スキップ
+    //           DoIO: write_a_en=write_a=1, write_a=0
+    //   Clock2: DoRegWrite: write_a_en=1 → アドレス確定
+    //           DoIO: write_a_en=0
+    //   Write(1,val): write_d=1, write_data=val
+    //   Clock3: DoRegWrite: write_d_en=0 → スキップ
+    //           DoIO: write_d_en=1, write_d=0
+    //   Clock4: DoRegWrite: write_d_en=1 → データ確定
+    //
+    // OPLL: DoRegWrite → DoIO の順。同じく2クロック必要。
     void write_direct(uint8_t reg, uint8_t value, uint32_t port) {
         switch (tag) {
         case NukedTag::OPL3: {
@@ -292,79 +313,55 @@ struct ChipSlot {
             OPL2_WriteReg(&state.opl2, reg, value);
             break;
         case NukedTag::OPN2_YM2612:
-        case NukedTag::OPN2C:
-            // write_a/write_d を直接セットして1クロックずつ回す
-            // これによりシフトレジスタの write_data 共有問題を回避
-            {
-                uint8_t bank = (port & 0x02) ? 3 : 1; // bank0=0x01, bank1=0x03
-                state.opn2.write_data = reg;
-                state.opn2.write_a = bank;
-                {
-                    int16_t dummy[2]{};
-                    OPN2_Clock(&state.opn2, dummy);
-                }
-                state.opn2.write_data = value;
-                state.opn2.write_d = 0x01;
-                {
-                    int16_t dummy[2]{};
-                    OPN2_Clock(&state.opn2, dummy);
-                }
-            }
+        case NukedTag::OPN2C: {
+            // DoIO→DoRegWrite 順。1クロックで確定。
+            // write_data に bank ビットを含める (OPN2_Write の実装に合わせる)
+            int16_t dummy[2]{};
+            state.opn2.write_data = (uint16_t)(((port & 0x02) << 7) | reg);
+            state.opn2.write_a |= 1;
+            OPN2_Clock(&state.opn2, dummy);  // DoIO: write_a_en=true → DoRegWrite: アドレス確定
+            state.opn2.write_data = value;
+            state.opn2.write_d |= 1;
+            OPN2_Clock(&state.opn2, dummy);  // DoIO: write_d_en=true → DoRegWrite: データ確定
             break;
+        }
         case NukedTag::OPM:
-        case NukedTag::OPP:
-            // シフトレジスタをバイパス: write_a_en と write_d_en を直接セット
+        case NukedTag::OPP: {
+            // DoRegWrite→DoIO 順。2クロックで確定。
+            int32_t dummy[2]{};
             state.opm.write_data = reg;
-            state.opm.write_a = 0x01;  // 次クロックで write_a_en = true
-            // アドレスを先に確定させてからデータを書く
-            // → write_a をフルセットして即時 write_a_en にする
-            state.opm.write_a_en = 1;
-            state.opm.write_d_en = 0;
-            // OPM_DoIO の処理を模倣してアドレスを確定
-            // opm.cのOPM_DoModeWrite/OPM_DoRegWriteを直接呼ぶ代わりに
-            // write_busy_cnt をリセットして通常の OPM_Write シーケンスを使う
-            // ただしクロックを挟まず write_data を分離して設定
-            state.opm.write_a_en = 0;
-            state.opm.write_d_en = 0;
-            // write_a=0x01, write_data=reg の状態でOPM_Clockを1回回せば
-            // write_a_en=true になるので、それを直接セットして処理
-            state.opm.write_data = reg;
-            state.opm.write_a    = 0x01;
-            // 1クロック相当の処理（アドレス確定）
-            {
-                int32_t dummy[2]{};
-                OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);
-            }
-            // データをセット
+            state.opm.write_a = 1;
+            OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);  // DoRegWrite: スキップ, DoIO: write_a_en=1
+            OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);  // DoRegWrite: アドレス確定, DoIO: write_a_en=0
             state.opm.write_data = value;
-            state.opm.write_d    = 0x01;
-            // 1クロック相当の処理（データ確定）
-            {
-                int32_t dummy[2]{};
-                OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);
-            }
+            state.opm.write_d = 1;
+            OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);  // DoRegWrite: スキップ, DoIO: write_d_en=1
+            OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);  // DoRegWrite: データ確定
             break;
+        }
         case NukedTag::OPLL:
         case NukedTag::OPLL_B:
         case NukedTag::OPLL_YMF281:
         case NukedTag::OPLLP_B:
         case NukedTag::OPLL2:
         case NukedTag::OPLL_YM2423:
-        case NukedTag::OPLL_VRC7:
-            // OPLLも同様
+        case NukedTag::OPLL_VRC7: {
+            // DoRegWrite→DoIO 順。2クロックで確定。
+            int32_t dummy[2]{};
             state.opll.write_data = reg;
-            state.opll.write_a    = 0x01;
-            {
-                int32_t dummy[2]{};
-                OPLL_Clock(&state.opll, dummy);
-            }
+            state.opll.write_a |= 1;
+            OPLL_Clock(&state.opll, dummy);  // DoRegWrite: write_a_en=(write_a&3)==1=true → アドレス確定(!), DoIO: write_a_en set
+            // 待って — OPLL_Write は |=1 なので write_a=1, DoIO前に DoRegWrite が走るとき
+            // write_a_en は DoIO 後の値なので、最初のクロックでは write_a_en は前回の値
+            // → 初回は 0 のはず → スキップ → DoIO: write_a_en=(1&3)==1=true
+            // → 2クロック目: DoRegWrite: write_a_en=true → アドレス確定
+            OPLL_Clock(&state.opll, dummy);  // DoRegWrite: アドレス確定, DoIO: write_a_en=false
             state.opll.write_data = value;
-            state.opll.write_d    = 0x01;
-            {
-                int32_t dummy[2]{};
-                OPLL_Clock(&state.opll, dummy);
-            }
+            state.opll.write_d |= 1;
+            OPLL_Clock(&state.opll, dummy);  // DoRegWrite: スキップ, DoIO: write_d_en=true
+            OPLL_Clock(&state.opll, dummy);  // DoRegWrite: データ確定
             break;
+        }
         case NukedTag::PSG:
             YMPSG_Write(&state.psg, value);
             break;

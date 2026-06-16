@@ -269,39 +269,39 @@ struct ChipSlot {
         q_head.store(next, std::memory_order_release);
     }
 
+    // OPN2/OPM/OPLL 書き込みの進行状態
+    // 0=idle, 1=addr待ち, 2-=クロック待ち
+    uint16_t pending_reg   = 0;
+    uint8_t  pending_val   = 0;
+    int      pending_state = 0;
+
     void flush() {
-        size_t t = q_tail.load(std::memory_order_relaxed);
-        while (t != q_head.load(std::memory_order_acquire)) {
-            auto& e = q_buf[t];
-            write_direct(e.reg, e.value, e.port);
-            t = (t + 1) % Q_CAP;
+        // OPL2/OPL3/PSG は WriteReg が即時完結するためここで処理
+        // OPN2/OPM/OPLL はスロット/チャンネルタイミング依存のため
+        // gen_native のクロックループ内で処理する（pending フラグで管理）
+        switch (tag) {
+        case NukedTag::OPL3:
+        case NukedTag::OPL2:
+        case NukedTag::PSG: {
+            size_t t = q_tail.load(std::memory_order_relaxed);
+            while (t != q_head.load(std::memory_order_acquire)) {
+                auto& e = q_buf[t];
+                write_direct(e.reg, e.value, e.port);
+                t = (t + 1) % Q_CAP;
+            }
+            q_tail.store(t, std::memory_order_release);
+            break;
         }
-        q_tail.store(t, std::memory_order_release);
+        default:
+            // OPN2/OPM/OPLL: gen_native 内で処理
+            break;
+        }
     }
 
-    // シフトレジスタを使わずにレジスタ書き込みを確定させる
-    // 各チップの Clock 内での DoIO/DoRegWrite 実行順序に基づく正確な実装:
-    //
-    // OPN2: DoIO → DoRegWrite の順。Write後1クロックで確定。
-    //   Write(0,reg): write_a|=1, write_data=((bank<<7)&0x100)|reg
-    //   Clock1: DoIO: write_a_en=true, write_a<<=1
-    //           DoRegWrite: write_a_en=true → アドレス確定
-    //   Write(1,val): write_d|=1, write_data=val
-    //   Clock2: DoIO: write_d_en=true, write_d<<=1
-    //           DoRegWrite: write_d_en=true → データ確定
-    //
-    // OPM: DoRegWrite → DoIO の順。Write後2クロックで確定。
-    //   Write(0,reg): write_a=1, write_data=reg
-    //   Clock1: DoRegWrite: write_a_en=0 → スキップ
-    //           DoIO: write_a_en=write_a=1, write_a=0
-    //   Clock2: DoRegWrite: write_a_en=1 → アドレス確定
-    //           DoIO: write_a_en=0
-    //   Write(1,val): write_d=1, write_data=val
-    //   Clock3: DoRegWrite: write_d_en=0 → スキップ
-    //           DoIO: write_d_en=1, write_d=0
-    //   Clock4: DoRegWrite: write_d_en=1 → データ確定
-    //
-    // OPLL: DoRegWrite → DoIO の順。同じく2クロック必要。
+    // OPN2/OPM/OPLL 用: 書き込みフラグをセットしてクロック1つ分進める
+    // gen_native のループから呼ばれる
+    // 戻り値: 書き込みが開始された場合 true
+    // 書き込みフラグをセットするだけ（OPL/PSGのみ。OPN2/OPM/OPLLはtick_pending*で処理）
     void write_direct(uint8_t reg, uint8_t value, uint32_t port) {
         switch (tag) {
         case NukedTag::OPL3: {
@@ -312,59 +312,100 @@ struct ChipSlot {
         case NukedTag::OPL2:
             OPL2_WriteReg(&state.opl2, reg, value);
             break;
-        case NukedTag::OPN2_YM2612:
-        case NukedTag::OPN2C: {
-            // DoIO→DoRegWrite 順。1クロックで確定。
-            // write_data に bank ビットを含める (OPN2_Write の実装に合わせる)
-            int16_t dummy[2]{};
-            state.opn2.write_data = (uint16_t)(((port & 0x02) << 7) | reg);
-            state.opn2.write_a |= 1;
-            OPN2_Clock(&state.opn2, dummy);  // DoIO: write_a_en=true → DoRegWrite: アドレス確定
-            state.opn2.write_data = value;
-            state.opn2.write_d |= 1;
-            OPN2_Clock(&state.opn2, dummy);  // DoIO: write_d_en=true → DoRegWrite: データ確定
-            break;
-        }
-        case NukedTag::OPM:
-        case NukedTag::OPP: {
-            // DoRegWrite→DoIO 順。2クロックで確定。
-            int32_t dummy[2]{};
-            state.opm.write_data = reg;
-            state.opm.write_a = 1;
-            OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);  // DoRegWrite: スキップ, DoIO: write_a_en=1
-            OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);  // DoRegWrite: アドレス確定, DoIO: write_a_en=0
-            state.opm.write_data = value;
-            state.opm.write_d = 1;
-            OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);  // DoRegWrite: スキップ, DoIO: write_d_en=1
-            OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);  // DoRegWrite: データ確定
-            break;
-        }
-        case NukedTag::OPLL:
-        case NukedTag::OPLL_B:
-        case NukedTag::OPLL_YMF281:
-        case NukedTag::OPLLP_B:
-        case NukedTag::OPLL2:
-        case NukedTag::OPLL_YM2423:
-        case NukedTag::OPLL_VRC7: {
-            // DoRegWrite→DoIO 順。2クロックで確定。
-            int32_t dummy[2]{};
-            state.opll.write_data = reg;
-            state.opll.write_a |= 1;
-            OPLL_Clock(&state.opll, dummy);  // DoRegWrite: write_a_en=(write_a&3)==1=true → アドレス確定(!), DoIO: write_a_en set
-            // 待って — OPLL_Write は |=1 なので write_a=1, DoIO前に DoRegWrite が走るとき
-            // write_a_en は DoIO 後の値なので、最初のクロックでは write_a_en は前回の値
-            // → 初回は 0 のはず → スキップ → DoIO: write_a_en=(1&3)==1=true
-            // → 2クロック目: DoRegWrite: write_a_en=true → アドレス確定
-            OPLL_Clock(&state.opll, dummy);  // DoRegWrite: アドレス確定, DoIO: write_a_en=false
-            state.opll.write_data = value;
-            state.opll.write_d |= 1;
-            OPLL_Clock(&state.opll, dummy);  // DoRegWrite: スキップ, DoIO: write_d_en=true
-            OPLL_Clock(&state.opll, dummy);  // DoRegWrite: データ確定
-            break;
-        }
         case NukedTag::PSG:
             YMPSG_Write(&state.psg, value);
             break;
+        default:
+            break; // OPN2/OPM/OPLL は tick_pending_* で処理
+        }
+    }
+
+    // gen_native の各クロック前に呼ぶ
+    // キューからアイテムを取り出し、アドレス→データの2段階書き込みを
+    // クロック進行に合わせてステートマシンで処理する
+
+    void tick_pending_opn2() {
+        // OPN2: DoIO→DoRegWrite の順。
+        // state=0: idle → キューから取得してstate=1
+        // state=1: addrフラグセット → Clock後にaddr確定 → state=2
+        // state=2: dataフラグセット → Clock後にdata確定 → state=3
+        // state=3: 完了 → state=0
+        if (pending_state == 0) {
+            size_t t = q_tail.load(std::memory_order_relaxed);
+            if (t == q_head.load(std::memory_order_acquire)) return;
+            auto& e = q_buf[t];
+            pending_reg = (uint16_t)(((e.port & 0x02) << 7) | e.reg);
+            pending_val = e.value;
+            pending_state = 1;
+            q_tail.store((t + 1) % Q_CAP, std::memory_order_release);
+        }
+        if (pending_state == 1) {
+            state.opn2.write_data = pending_reg;
+            state.opn2.write_a |= 1;
+            pending_state = 2;
+        } else if (pending_state == 2) {
+            state.opn2.write_data = pending_val;
+            state.opn2.write_d |= 1;
+            pending_state = 3;
+        } else if (pending_state == 3) {
+            pending_state = 0;
+        }
+    }
+
+    void tick_pending_opm() {
+        if (pending_state == 0) {
+            size_t t = q_tail.load(std::memory_order_relaxed);
+            if (t == q_head.load(std::memory_order_acquire)) return;
+            auto& e = q_buf[t];
+            pending_reg   = e.reg;
+            pending_val   = e.value;
+            pending_state = 1;
+            q_tail.store((t + 1) % Q_CAP, std::memory_order_release);
+        }
+        if (pending_state == 1) {
+            state.opm.write_data = (uint8_t)pending_reg;
+            state.opm.write_a = 1;
+            pending_state = 2;
+        } else if (pending_state == 2) {
+            // DoIO 後: write_a_en が立った → addr確定済み
+            // 次クロックの DoRegWrite でaddr処理されるので待つ
+            pending_state = 3;
+        } else if (pending_state == 3) {
+            // addr確定 → dataフラグをセット
+            state.opm.write_data = pending_val;
+            state.opm.write_d = 1;
+            pending_state = 4;
+        } else if (pending_state == 4) {
+            pending_state = 5;
+        } else if (pending_state == 5) {
+            pending_state = 0;
+        }
+    }
+
+    void tick_pending_opll() {
+        if (pending_state == 0) {
+            size_t t = q_tail.load(std::memory_order_relaxed);
+            if (t == q_head.load(std::memory_order_acquire)) return;
+            auto& e = q_buf[t];
+            pending_reg   = e.reg;
+            pending_val   = e.value;
+            pending_state = 1;
+            q_tail.store((t + 1) % Q_CAP, std::memory_order_release);
+        }
+        if (pending_state == 1) {
+            state.opll.write_data = (uint8_t)pending_reg;
+            state.opll.write_a |= 1;
+            pending_state = 2;
+        } else if (pending_state == 2) {
+            pending_state = 3;
+        } else if (pending_state == 3) {
+            state.opll.write_data = pending_val;
+            state.opll.write_d |= 1;
+            pending_state = 4;
+        } else if (pending_state == 4) {
+            pending_state = 5;
+        } else if (pending_state == 5) {
+            pending_state = 0;
         }
     }
 
@@ -387,10 +428,13 @@ struct ChipSlot {
             break;
         case NukedTag::OPN2_YM2612:
         case NukedTag::OPN2C:
-            // 1サンプル = 24クロック (6マスタークロック×24 = 144マスタークロック)
+            // 1サンプル = 24クロック。各クロック前に書き込み処理を1ステップ進める
             for (uint32_t i = 0; i < n; ++i) {
                 int16_t buf[2]{};
-                for (int c = 0; c < 24; ++c) OPN2_Clock(&state.opn2, buf);
+                for (int c = 0; c < 24; ++c) {
+                    tick_pending_opn2();
+                    OPN2_Clock(&state.opn2, buf);
+                }
                 l[i] = buf[0] * S15; r[i] = buf[1] * S15;
             }
             break;
@@ -399,7 +443,10 @@ struct ChipSlot {
             // 1サンプル = 64クロック
             for (uint32_t i = 0; i < n; ++i) {
                 int32_t out[2]{};
-                for (int c = 0; c < 64; ++c) OPM_Clock(&state.opm, out, nullptr, nullptr, nullptr);
+                for (int c = 0; c < 64; ++c) {
+                    tick_pending_opm();
+                    OPM_Clock(&state.opm, out, nullptr, nullptr, nullptr);
+                }
                 l[i] = std::clamp(out[0], -32768, 32767) * S16;
                 r[i] = std::clamp(out[1], -32768, 32767) * S16;
             }
@@ -414,7 +461,10 @@ struct ChipSlot {
             // 1サンプル = 72クロック
             for (uint32_t i = 0; i < n; ++i) {
                 int32_t out[2]{};
-                for (int c = 0; c < 72; ++c) OPLL_Clock(&state.opll, out);
+                for (int c = 0; c < 72; ++c) {
+                    tick_pending_opll();
+                    OPLL_Clock(&state.opll, out);
+                }
                 float m = std::clamp(out[0] + out[1], -32768, 32767) * S16;
                 l[i] = r[i] = m;
             }

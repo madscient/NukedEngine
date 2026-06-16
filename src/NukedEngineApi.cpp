@@ -269,12 +269,6 @@ struct ChipSlot {
         q_head.store(next, std::memory_order_release);
     }
 
-    // OPN2/OPM/OPLL 書き込みの進行状態
-    // 0=idle, 1=addr待ち, 2-=クロック待ち
-    uint16_t pending_reg   = 0;
-    uint8_t  pending_val   = 0;
-    int      pending_state = 0;
-
     void flush() {
         // OPL2/OPL3/PSG は WriteReg が即時完結するためここで処理
         // OPN2/OPM/OPLL はスロット/チャンネルタイミング依存のため
@@ -301,7 +295,7 @@ struct ChipSlot {
     // OPN2/OPM/OPLL 用: 書き込みフラグをセットしてクロック1つ分進める
     // gen_native のループから呼ばれる
     // 戻り値: 書き込みが開始された場合 true
-    // 書き込みフラグをセットするだけ（OPL/PSGのみ。OPN2/OPM/OPLLはtick_pending*で処理）
+    // 書き込みフラグをセットするだけ（OPL/PSGのみ。OPN2/OPM/OPLLはwrite_direct_fullで処理）
     void write_direct(uint8_t reg, uint8_t value, uint32_t port) {
         switch (tag) {
         case NukedTag::OPL3: {
@@ -316,96 +310,55 @@ struct ChipSlot {
             YMPSG_Write(&state.psg, value);
             break;
         default:
-            break; // OPN2/OPM/OPLL は tick_pending_* で処理
+            break;
         }
     }
 
-    // gen_native の各クロック前に呼ぶ
-    // キューからアイテムを取り出し、アドレス→データの2段階書き込みを
-    // クロック進行に合わせてステートマシンで処理する
-
-    void tick_pending_opn2() {
-        // OPN2: DoIO→DoRegWrite の順。
-        // state=0: idle → キューから取得してstate=1
-        // state=1: addrフラグセット → Clock後にaddr確定 → state=2
-        // state=2: dataフラグセット → Clock後にdata確定 → state=3
-        // state=3: 完了 → state=0
-        if (pending_state == 0) {
-            size_t t = q_tail.load(std::memory_order_relaxed);
-            if (t == q_head.load(std::memory_order_acquire)) return;
-            auto& e = q_buf[t];
-            pending_reg = (uint16_t)(((e.port & 0x02) << 7) | e.reg);
-            pending_val = e.value;
-            pending_state = 1;
-            q_tail.store((t + 1) % Q_CAP, std::memory_order_release);
-        }
-        if (pending_state == 1) {
-            state.opn2.write_data = pending_reg;
+    // OPN2/OPM/OPLL 用フルサイクル版書き込み
+    // スロット/チャンネルタイミング依存のため1サンプル分のクロックを回して確定させる
+    // FmEngine_Write から呼び出しスレッド（メインスレッド）で実行する
+    void write_direct_full(uint8_t reg, uint8_t value, uint32_t port) {
+        switch (tag) {
+        case NukedTag::OPN2_YM2612:
+        case NukedTag::OPN2C: {
+            int16_t dummy[2]{};
+            state.opn2.write_data = (uint16_t)(((port & 0x02) << 7) | reg);
             state.opn2.write_a |= 1;
-            pending_state = 2;
-        } else if (pending_state == 2) {
-            state.opn2.write_data = pending_val;
+            for (int c = 0; c < 24; ++c) OPN2_Clock(&state.opn2, dummy);
+            state.opn2.write_data = value;
             state.opn2.write_d |= 1;
-            pending_state = 3;
-        } else if (pending_state == 3) {
-            pending_state = 0;
+            for (int c = 0; c < 24; ++c) OPN2_Clock(&state.opn2, dummy);
+            break;
         }
-    }
-
-    void tick_pending_opm() {
-        if (pending_state == 0) {
-            size_t t = q_tail.load(std::memory_order_relaxed);
-            if (t == q_head.load(std::memory_order_acquire)) return;
-            auto& e = q_buf[t];
-            pending_reg   = e.reg;
-            pending_val   = e.value;
-            pending_state = 1;
-            q_tail.store((t + 1) % Q_CAP, std::memory_order_release);
-        }
-        if (pending_state == 1) {
-            state.opm.write_data = (uint8_t)pending_reg;
+        case NukedTag::OPM:
+        case NukedTag::OPP: {
+            int32_t dummy[2]{};
+            state.opm.write_data = reg;
             state.opm.write_a = 1;
-            pending_state = 2;
-        } else if (pending_state == 2) {
-            // DoIO 後: write_a_en が立った → addr確定済み
-            // 次クロックの DoRegWrite でaddr処理されるので待つ
-            pending_state = 3;
-        } else if (pending_state == 3) {
-            // addr確定 → dataフラグをセット
-            state.opm.write_data = pending_val;
+            for (int c = 0; c < 64; ++c) OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);
+            state.opm.write_data = value;
             state.opm.write_d = 1;
-            pending_state = 4;
-        } else if (pending_state == 4) {
-            pending_state = 5;
-        } else if (pending_state == 5) {
-            pending_state = 0;
+            for (int c = 0; c < 64; ++c) OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);
+            break;
         }
-    }
-
-    void tick_pending_opll() {
-        if (pending_state == 0) {
-            size_t t = q_tail.load(std::memory_order_relaxed);
-            if (t == q_head.load(std::memory_order_acquire)) return;
-            auto& e = q_buf[t];
-            pending_reg   = e.reg;
-            pending_val   = e.value;
-            pending_state = 1;
-            q_tail.store((t + 1) % Q_CAP, std::memory_order_release);
-        }
-        if (pending_state == 1) {
-            state.opll.write_data = (uint8_t)pending_reg;
+        case NukedTag::OPLL:
+        case NukedTag::OPLL_B:
+        case NukedTag::OPLL_YMF281:
+        case NukedTag::OPLLP_B:
+        case NukedTag::OPLL2:
+        case NukedTag::OPLL_YM2423:
+        case NukedTag::OPLL_VRC7: {
+            int32_t dummy[2]{};
+            state.opll.write_data = reg;
             state.opll.write_a |= 1;
-            pending_state = 2;
-        } else if (pending_state == 2) {
-            pending_state = 3;
-        } else if (pending_state == 3) {
-            state.opll.write_data = pending_val;
+            for (int c = 0; c < 72; ++c) OPLL_Clock(&state.opll, dummy);
+            state.opll.write_data = value;
             state.opll.write_d |= 1;
-            pending_state = 4;
-        } else if (pending_state == 4) {
-            pending_state = 5;
-        } else if (pending_state == 5) {
-            pending_state = 0;
+            for (int c = 0; c < 72; ++c) OPLL_Clock(&state.opll, dummy);
+            break;
+        }
+        default:
+            break;
         }
     }
 
@@ -428,13 +381,10 @@ struct ChipSlot {
             break;
         case NukedTag::OPN2_YM2612:
         case NukedTag::OPN2C:
-            // 1サンプル = 24クロック。各クロック前に書き込み処理を1ステップ進める
+            // 1サンプル = 24クロック (書き込みはwrite_direct_fullで処理済み)
             for (uint32_t i = 0; i < n; ++i) {
                 int16_t buf[2]{};
-                for (int c = 0; c < 24; ++c) {
-                    tick_pending_opn2();
-                    OPN2_Clock(&state.opn2, buf);
-                }
+                for (int c = 0; c < 24; ++c) OPN2_Clock(&state.opn2, buf);
                 l[i] = buf[0] * S15; r[i] = buf[1] * S15;
             }
             break;
@@ -443,10 +393,7 @@ struct ChipSlot {
             // 1サンプル = 64クロック
             for (uint32_t i = 0; i < n; ++i) {
                 int32_t out[2]{};
-                for (int c = 0; c < 64; ++c) {
-                    tick_pending_opm();
-                    OPM_Clock(&state.opm, out, nullptr, nullptr, nullptr);
-                }
+                for (int c = 0; c < 64; ++c) OPM_Clock(&state.opm, out, nullptr, nullptr, nullptr);
                 l[i] = std::clamp(out[0], -32768, 32767) * S16;
                 r[i] = std::clamp(out[1], -32768, 32767) * S16;
             }
@@ -461,10 +408,7 @@ struct ChipSlot {
             // 1サンプル = 72クロック
             for (uint32_t i = 0; i < n; ++i) {
                 int32_t out[2]{};
-                for (int c = 0; c < 72; ++c) {
-                    tick_pending_opll();
-                    OPLL_Clock(&state.opll, out);
-                }
+                for (int c = 0; c < 72; ++c) OPLL_Clock(&state.opll, out);
                 float m = std::clamp(out[0] + out[1], -32768, 32767) * S16;
                 l[i] = r[i] = m;
             }
@@ -650,7 +594,28 @@ FmEngine_Write(FmEngineHandle h, uint32_t chip_id, uint8_t reg, uint8_t value, u
     REQUIRE_PTR(h);
     auto* eng = static_cast<FmEngineOpaque*>(h);
     if (chip_id >= eng->chips.size()) return FM_ERR_INVALID_ARG;
-    eng->chips[chip_id]->enqueue(reg, value, port);
+    auto* chip = eng->chips[chip_id].get();
+    switch (chip->tag) {
+    // OPN2/OPM/OPLL: スロット/チャンネルタイミング依存のためフルサイクル処理が必要。
+    // WASAPIスレッドではなく呼び出しスレッド（メインスレッド）で即座に処理する。
+    case NukedTag::OPN2_YM2612:
+    case NukedTag::OPN2C:
+    case NukedTag::OPM:
+    case NukedTag::OPP:
+    case NukedTag::OPLL:
+    case NukedTag::OPLL_B:
+    case NukedTag::OPLL_YMF281:
+    case NukedTag::OPLLP_B:
+    case NukedTag::OPLL2:
+    case NukedTag::OPLL_YM2423:
+    case NukedTag::OPLL_VRC7:
+        chip->write_direct_full(reg, value, port);
+        break;
+    default:
+        // OPL2/OPL3/PSG: WriteReg が即時完結するためキュー経由でも問題なし
+        chip->enqueue(reg, value, port);
+        break;
+    }
     return FM_OK;
 }
 

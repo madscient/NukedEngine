@@ -270,33 +270,24 @@ struct ChipSlot {
     }
 
     void flush() {
-        // OPL2/OPL3/PSG は WriteReg が即時完結するためここで処理
-        // OPN2/OPM/OPLL はスロット/チャンネルタイミング依存のため
-        // gen_native のクロックループ内で処理する（pending フラグで管理）
-        switch (tag) {
-        case NukedTag::OPL3:
-        case NukedTag::OPL2:
-        case NukedTag::PSG: {
-            size_t t = q_tail.load(std::memory_order_relaxed);
-            while (t != q_head.load(std::memory_order_acquire)) {
-                auto& e = q_buf[t];
-                write_direct(e.reg, e.value, e.port);
-                t = (t + 1) % Q_CAP;
-            }
-            q_tail.store(t, std::memory_order_release);
-            break;
+        size_t t = q_tail.load(std::memory_order_relaxed);
+        while (t != q_head.load(std::memory_order_acquire)) {
+            auto& e = q_buf[t];
+            // OPL2/OPL3/PSG は WriteReg が即時完結
+            // OPN2/OPM/OPLL は write_direct_full でフルサイクル処理
+            // どちらも同一スレッド（WASAPIスレッド）から呼ばれるため競合なし
+            write_direct_full(e.reg, e.value, e.port);
+            t = (t + 1) % Q_CAP;
         }
-        default:
-            // OPN2/OPM/OPLL: gen_native 内で処理
-            break;
-        }
+        q_tail.store(t, std::memory_order_release);
     }
 
-    // OPN2/OPM/OPLL 用: 書き込みフラグをセットしてクロック1つ分進める
-    // gen_native のループから呼ばれる
-    // 戻り値: 書き込みが開始された場合 true
-    // 書き込みフラグをセットするだけ（OPL/PSGのみ。OPN2/OPM/OPLLはwrite_direct_fullで処理）
-    void write_direct(uint8_t reg, uint8_t value, uint32_t port) {
+
+    // 全チップ共通の書き込み処理
+    // OPL2/OPL3/PSG: WriteReg が即時完結
+    // OPN2/OPM/OPLL: スロット/チャンネルタイミング依存のためフルサイクルのクロックを回す
+    // generate() → flush() から WASAPIスレッドのみで呼ばれる（スレッド競合なし）
+    void write_direct_full(uint8_t reg, uint8_t value, uint32_t port) {
         switch (tag) {
         case NukedTag::OPL3: {
             uint16_t full = static_cast<uint16_t>((port & 1u) << 8 | reg);
@@ -306,20 +297,6 @@ struct ChipSlot {
         case NukedTag::OPL2:
             OPL2_WriteReg(&state.opl2, reg, value);
             break;
-        case NukedTag::PSG:
-            YMPSG_Write(&state.psg, value);
-            break;
-        default:
-            break;
-        }
-    }
-
-    // OPN2/OPM/OPLL 用フルサイクル版書き込み
-    // スロット/チャンネルタイミング依存のため1サンプル分のクロックを回して確定させる
-    // FmEngine_Write から呼び出しスレッド（メインスレッド）で実行する
-    void write_direct_full(uint8_t reg, uint8_t value, uint32_t port) {
-        switch (tag) {
-        case NukedTag::OPN2_YM2612:
         case NukedTag::OPN2C: {
             int16_t dummy[2]{};
             state.opn2.write_data = (uint16_t)(((port & 0x02) << 7) | reg);
@@ -357,12 +334,13 @@ struct ChipSlot {
             for (int c = 0; c < 72; ++c) OPLL_Clock(&state.opll, dummy);
             break;
         }
+        case NukedTag::PSG:
+            YMPSG_Write(&state.psg, value);
+            break;
         default:
             break;
         }
     }
-
-    // ネイティブレートで n フレーム生成 → float [-1, +1]
     void gen_native(float* l, float* r, uint32_t n) {
         constexpr float S16 = 1.0f / 32768.0f;
         constexpr float S15 = 1.0f / 16384.0f;
@@ -594,28 +572,8 @@ FmEngine_Write(FmEngineHandle h, uint32_t chip_id, uint8_t reg, uint8_t value, u
     REQUIRE_PTR(h);
     auto* eng = static_cast<FmEngineOpaque*>(h);
     if (chip_id >= eng->chips.size()) return FM_ERR_INVALID_ARG;
-    auto* chip = eng->chips[chip_id].get();
-    switch (chip->tag) {
-    // OPN2/OPM/OPLL: スロット/チャンネルタイミング依存のためフルサイクル処理が必要。
-    // WASAPIスレッドではなく呼び出しスレッド（メインスレッド）で即座に処理する。
-    case NukedTag::OPN2_YM2612:
-    case NukedTag::OPN2C:
-    case NukedTag::OPM:
-    case NukedTag::OPP:
-    case NukedTag::OPLL:
-    case NukedTag::OPLL_B:
-    case NukedTag::OPLL_YMF281:
-    case NukedTag::OPLLP_B:
-    case NukedTag::OPLL2:
-    case NukedTag::OPLL_YM2423:
-    case NukedTag::OPLL_VRC7:
-        chip->write_direct_full(reg, value, port);
-        break;
-    default:
-        // OPL2/OPL3/PSG: WriteReg が即時完結するためキュー経由でも問題なし
-        chip->enqueue(reg, value, port);
-        break;
-    }
+    // 全チップ共通: キューに積んでWASAPIスレッドで処理
+    eng->chips[chip_id]->enqueue(reg, value, port);
     return FM_OK;
 }
 

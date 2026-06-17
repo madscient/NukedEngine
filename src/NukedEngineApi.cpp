@@ -76,13 +76,13 @@ namespace NukedClock {
     constexpr uint32_t PSG    = 3'579'545;
 }
 
-// 各チップの 1サンプルあたりのクロック数
+// 各チップの 1サンプルあたりのクロック数（libvgmリファレンス実装より）
 // OPN2: 6マスタークロック×24クロック = 144マスタークロック / サンプル
-// OPM:  2分周×32スロット = 64クロック / サンプル
-// OPLL: 4分周×18スロット = 72クロック / サンプル
+// OPM:  32クロック / サンプル (libvgm: 32クロック中i==0のbufferのみ使用)
+// OPLL: 18クロック / サンプル (libvgm: 18クロックのbuffer合算)
 #define NUKED_CLOCKS_PER_SAMPLE_OPN2  24
-#define NUKED_CLOCKS_PER_SAMPLE_OPM   64
-#define NUKED_CLOCKS_PER_SAMPLE_OPLL  72
+#define NUKED_CLOCKS_PER_SAMPLE_OPM   32
+#define NUKED_CLOCKS_PER_SAMPLE_OPLL  18
 
 // =========================================================
 //  LinearResampler (FmChip.h の実装と同等)
@@ -282,30 +282,13 @@ struct ChipSlot {
     }
 
     void flush() {
-        // OPL2/OPL3/OPN2/PSG: write_direct_full が即時処理
-        // OPM/OPLL: gen_native 内でキューから1エントリずつ処理
-        switch (tag) {
-        case NukedTag::OPM:
-        case NukedTag::OPP:
-        case NukedTag::OPLL:
-        case NukedTag::OPLL_B:
-        case NukedTag::OPLL_YMF281:
-        case NukedTag::OPLLP_B:
-        case NukedTag::OPLL2:
-        case NukedTag::OPLL_YM2423:
-        case NukedTag::OPLL_VRC7:
-            break;  // gen_native で処理
-        default: {
-            size_t t = q_tail.load(std::memory_order_relaxed);
-            while (t != q_head.load(std::memory_order_acquire)) {
-                auto& e = q_buf[t];
-                write_direct_full(e.reg, e.value, e.port);
-                t = (t + 1) % Q_CAP;
-            }
-            q_tail.store(t, std::memory_order_release);
-            break;
+        size_t t = q_tail.load(std::memory_order_relaxed);
+        while (t != q_head.load(std::memory_order_acquire)) {
+            auto& e = q_buf[t];
+            write_direct_full(e.reg, e.value, e.port);
+            t = (t + 1) % Q_CAP;
         }
-        }
+        q_tail.store(t, std::memory_order_release);
     }
 
     // OPN2/OPM/OPLL: キュー内の全エントリをフルサイクルで処理しつつ出力バッファに反映
@@ -346,22 +329,39 @@ struct ChipSlot {
             break;
         }
         case NukedTag::OPM:
-        case NukedTag::OPP:
-            // クロック消費ゼロ: キューに積まれたまま gen_native で処理
-            // gen_nativeの各サンプルループ先頭でキューから1エントリずつ取り出し
-            // reg_address/reg_data_ready を設定して64クロックで確定させる
-            (void)reg; (void)value; (void)port;  // flush()側で処理
+        case NukedTag::OPP: {
+            // libvgm準拠: 32クロック/サンプル
+            // 書き込み確定に必要なフルサイクルを回す（出力は捨てる）
+            int32_t dummy[2]{};
+            state.opm.write_data = reg;
+            state.opm.write_a = 1;
+            for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPM; ++c)
+                OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);
+            state.opm.write_data = value;
+            state.opm.write_d = 1;
+            for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPM; ++c)
+                OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);
             break;
+        }
         case NukedTag::OPLL:
         case NukedTag::OPLL_B:
         case NukedTag::OPLL_YMF281:
         case NukedTag::OPLLP_B:
         case NukedTag::OPLL2:
         case NukedTag::OPLL_YM2423:
-        case NukedTag::OPLL_VRC7:
-            // 同様にクロック消費ゼロ
-            (void)reg; (void)value; (void)port;
+        case NukedTag::OPLL_VRC7: {
+            // libvgm準拠: 18クロック/サンプル
+            int32_t dummy[2]{};
+            state.opll.write_data = reg;
+            state.opll.write_a |= 1;
+            for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPLL; ++c)
+                OPLL_Clock(&state.opll, dummy);
+            state.opll.write_data = value;
+            state.opll.write_d |= 1;
+            for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPLL; ++c)
+                OPLL_Clock(&state.opll, dummy);
             break;
+        }
         case NukedTag::PSG:
             YMPSG_Write(&state.psg, value);
             break;
@@ -408,50 +408,16 @@ struct ChipSlot {
             break;
         case NukedTag::OPM:
         case NukedTag::OPP: {
-            // キュー統合方式: 1サンプルにつき1エントリ処理
-            // write_direct_fullはクロックを消費しないため余分なウェイト/ノイズなし
+            // libvgm準拠: 32クロック中i==0のbuffer値のみ使用
             for (uint32_t i = 0; i < n; ++i) {
-                // サンプル生成前にキューから1エントリ処理
-                {
-                    size_t t = q_tail.load(std::memory_order_relaxed);
-                    if (t != q_head.load(std::memory_order_acquire)) {
-                        auto& e = q_buf[t];
-                        if (e.reg >= 0x20) {
-                            // スロット/チャンネルレジスタ: 直接設定
-                            state.opm.reg_address = e.reg;
-                            state.opm.reg_address_ready = 1;
-                            state.opm.reg_data = e.value;
-                            state.opm.reg_data_ready = 1;
-                        } else {
-                            // モードレジスタ(0x00-0x1F): write_a/write_d経由
-                            int32_t d[2]{};
-                            uint8_t s1, s2;
-                            state.opm.write_data = e.reg;
-                            state.opm.write_a = 1;
-                            OPM_Clock(&state.opm, d, &s1, &s2, nullptr);
-                            OPM_Clock(&state.opm, d, &s1, &s2, nullptr);
-                            state.opm.write_data = e.value;
-                            state.opm.write_d = 1;
-                            OPM_Clock(&state.opm, d, &s1, &s2, nullptr);
-                            OPM_Clock(&state.opm, d, &s1, &s2, nullptr);
-                        }
-                        q_tail.store((t + 1) % Q_CAP, std::memory_order_release);
-                    }
-                }
-                // 1サンプル生成（64クロック固定）
-                int32_t out_l = 0, out_r = 0;
-                uint8_t prev_sh1 = state.opm.dac_osh1;
-                uint8_t prev_sh2 = state.opm.dac_osh2;
+                int32_t out[2]{};
                 for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPM; ++c) {
-                    int32_t out[2]{};
-                    uint8_t sh1 = 0, sh2 = 0;
-                    OPM_Clock(&state.opm, out, &sh1, &sh2, nullptr);
-                    if (prev_sh1 && !sh1) out_r = out[1];
-                    if (prev_sh2 && !sh2) out_l = out[0];
-                    prev_sh1 = sh1; prev_sh2 = sh2;
+                    int32_t buf[2]{};
+                    OPM_Clock(&state.opm, buf, nullptr, nullptr, nullptr);
+                    if (c == 0) { out[0] = buf[0]; out[1] = buf[1]; }
                 }
-                l[i] = std::clamp(out_l, -32768, 32767) * S16;
-                r[i] = std::clamp(out_r, -32768, 32767) * S16;
+                l[i] = std::clamp(out[0], -32768, 32767) * S16;
+                r[i] = std::clamp(out[1], -32768, 32767) * S16;
             }
             break;
         }
@@ -462,38 +428,17 @@ struct ChipSlot {
         case NukedTag::OPLL2:
         case NukedTag::OPLL_YM2423:
         case NukedTag::OPLL_VRC7: {
-            // キュー統合方式: 1サンプルにつき1エントリ処理
+            // libvgm準拠: 18クロックのbuffer[0]/buffer[1]を合算
             for (uint32_t i = 0; i < n; ++i) {
-                {
-                    size_t t = q_tail.load(std::memory_order_relaxed);
-                    if (t != q_head.load(std::memory_order_acquire)) {
-                        auto& e = q_buf[t];
-                        if ((e.reg & 0xc0) == 0x00) {
-                            state.opll.address = e.reg;
-                            state.opll.write_fm_address = 1;
-                            state.opll.data = e.value;
-                            state.opll.write_fm_data = 1;
-                        } else {
-                            int32_t d[2]{};
-                            state.opll.write_data = e.reg;
-                            state.opll.write_a |= 1;
-                            OPLL_Clock(&state.opll, d);
-                            OPLL_Clock(&state.opll, d);
-                            state.opll.write_data = e.value;
-                            state.opll.write_d |= 1;
-                            OPLL_Clock(&state.opll, d);
-                            OPLL_Clock(&state.opll, d);
-                        }
-                        q_tail.store((t + 1) % Q_CAP, std::memory_order_release);
-                    }
-                }
-                int32_t out[2]{}, sum = 0;
+                int32_t sum_l = 0, sum_r = 0;
                 for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPLL; ++c) {
-                    OPLL_Clock(&state.opll, out);
-                    if (c >= NUKED_CLOCKS_PER_SAMPLE_OPLL - 18)
-                        sum += out[0] + out[1];
+                    int32_t buf[2]{};
+                    OPLL_Clock(&state.opll, buf);
+                    sum_l += buf[0];
+                    sum_r += buf[1];
                 }
-                float m = std::clamp(sum, -32768, 32767) * S16;
+                // melody + rhythm を合算（libvgmはmute条件で分離するが簡略化）
+                float m = std::clamp(sum_l + sum_r, -32768, 32767) * S16;
                 l[i] = r[i] = m;
             }
             break;

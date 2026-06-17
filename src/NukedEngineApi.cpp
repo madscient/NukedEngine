@@ -411,31 +411,31 @@ struct ChipSlot {
             break;
         case NukedTag::OPM:
         case NukedTag::OPP: {
-            // pre_bufを先に消費してから、sh2エッジ2回で1サンプル生成
+            // 固定64クロック方式（無限ループなし）
+            // 64クロック中に sh2立ち下がりが2回来る（32クロック間隔）
+            // 各sh2立ち下がりでL/Rが確定する → 2回目（最後）の値を使う
             uint32_t i = 0;
             while (i < n && !pre_l.empty()) {
                 l[i] = pre_l.front(); pre_l.pop_front();
                 r[i] = pre_r.front(); pre_r.pop_front();
                 ++i;
             }
-            uint8_t prev_sh1 = state.opm.dac_osh1;
-            uint8_t prev_sh2 = state.opm.dac_osh2;
-            int32_t last_r = 0;
-            int sh2_count = 0;
-            while (i < n) {
-                int32_t out[2]{};
-                uint8_t sh1 = 0, sh2 = 0;
-                OPM_Clock(&state.opm, out, &sh1, &sh2, nullptr);
-                if (prev_sh1 && !sh1) last_r = out[1];
-                if (prev_sh2 && !sh2) {
-                    if (++sh2_count >= 2) {
-                        l[i] = std::clamp(out[0], -32768, 32767) * S16;
-                        r[i] = std::clamp(last_r, -32768, 32767) * S16;
-                        ++i;
-                        sh2_count = 0;
-                    }
+            for (; i < n; ++i) {
+                int32_t out_l = 0, out_r = 0;
+                uint8_t prev_sh1 = state.opm.dac_osh1;
+                uint8_t prev_sh2 = state.opm.dac_osh2;
+                for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPM; ++c) {
+                    int32_t out[2]{};
+                    uint8_t sh1 = 0, sh2 = 0;
+                    OPM_Clock(&state.opm, out, &sh1, &sh2, nullptr);
+                    // sh1立ち下がり: dac_output[1](R)確定
+                    if (prev_sh1 && !sh1) out_r = out[1];
+                    // sh2立ち下がり: dac_output[0](L)確定
+                    if (prev_sh2 && !sh2) out_l = out[0];
+                    prev_sh1 = sh1; prev_sh2 = sh2;
                 }
-                prev_sh1 = sh1; prev_sh2 = sh2;
+                l[i] = std::clamp(out_l, -32768, 32767) * S16;
+                r[i] = std::clamp(out_r, -32768, 32767) * S16;
             }
             break;
         }

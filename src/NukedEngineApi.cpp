@@ -76,13 +76,13 @@ namespace NukedClock {
     constexpr uint32_t PSG    = 3'579'545;
 }
 
-// 各チップの 1サンプルあたりのクロック数（libvgmリファレンス実装より）
+// 各チップの 1サンプルあたりのクロック数（libvgm device_start より）
 // OPN2: 6マスタークロック×24クロック = 144マスタークロック / サンプル
-// OPM:  32クロック / サンプル (libvgm: 32クロック中i==0のbufferのみ使用)
-// OPLL: 18クロック / サンプル (libvgm: 18クロックのbuffer合算)
+// OPM:  clock / 64 (libvgm: rate = clock / 64)
+// OPLL: clock / 72 (libvgm: rate = clock / 72)
 #define NUKED_CLOCKS_PER_SAMPLE_OPN2  24
-#define NUKED_CLOCKS_PER_SAMPLE_OPM   32
-#define NUKED_CLOCKS_PER_SAMPLE_OPLL  18
+#define NUKED_CLOCKS_PER_SAMPLE_OPM   64
+#define NUKED_CLOCKS_PER_SAMPLE_OPLL  72
 
 // =========================================================
 //  LinearResampler (FmChip.h の実装と同等)
@@ -254,9 +254,10 @@ struct ChipSlot {
     std::atomic<float> gain_l{1.0f};
     std::atomic<float> gain_r{1.0f};
     LinearResampler resampler;
-    // write_direct_full でのフルサイクルクロック消費分の出力バッファ
-    // gen_native で優先的に使用してリサンプラーとの位相ずれを防ぐ
-    std::deque<float> pre_l, pre_r;
+    // write_direct_full でのフルサイクルクロック消費分をサンプル単位でカウント
+    // gen_native 冒頭でこの分だけ無音を出力してリサンプラーの位相を保つ
+    uint32_t skip_samples = 0;
+
 
     union {
         opl3_chip opl3;
@@ -330,8 +331,7 @@ struct ChipSlot {
         }
         case NukedTag::OPM:
         case NukedTag::OPP: {
-            // libvgm準拠: 32クロック/サンプル
-            // 書き込み確定に必要なフルサイクルを回す（出力は捨てる）
+            // フルサイクル方式: 消費クロックをskip_samplesに換算してgen_nativeで無音スキップ
             int32_t dummy[2]{};
             state.opm.write_data = reg;
             state.opm.write_a = 1;
@@ -341,6 +341,7 @@ struct ChipSlot {
             state.opm.write_d = 1;
             for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPM; ++c)
                 OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);
+            skip_samples += 2; // 64×2クロック = 2サンプル分
             break;
         }
         case NukedTag::OPLL:
@@ -350,7 +351,6 @@ struct ChipSlot {
         case NukedTag::OPLL2:
         case NukedTag::OPLL_YM2423:
         case NukedTag::OPLL_VRC7: {
-            // libvgm準拠: 18クロック/サンプル
             int32_t dummy[2]{};
             state.opll.write_data = reg;
             state.opll.write_a |= 1;
@@ -360,6 +360,7 @@ struct ChipSlot {
             state.opll.write_d |= 1;
             for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPLL; ++c)
                 OPLL_Clock(&state.opll, dummy);
+            skip_samples += 2; // 72×2クロック = 2サンプル分
             break;
         }
         case NukedTag::PSG:
@@ -372,6 +373,16 @@ struct ChipSlot {
     void gen_native(float* l, float* r, uint32_t n) {
         constexpr float S16 = 1.0f / 32768.0f;
         constexpr float S15 = 1.0f / 16384.0f; // 未使用になるが念のため残す
+        // write_direct_full でのフルサイクル消費分をスキップ（無音で補完）
+        // リサンプラーが要求する n サンプルは必ず全て埋める
+        if (skip_samples > 0) {
+            uint32_t skip = std::min(skip_samples, n);
+            std::fill(l, l + skip, 0.0f);
+            std::fill(r, r + skip, 0.0f);
+            skip_samples -= skip;
+            l += skip; r += skip; n -= skip;
+        }
+        if (n == 0) return;
         switch (tag) {
         case NukedTag::OPL3:
             for (uint32_t i = 0; i < n; ++i) {
@@ -408,7 +419,6 @@ struct ChipSlot {
             break;
         case NukedTag::OPM:
         case NukedTag::OPP: {
-            // libvgm準拠: 32クロック中i==0のbuffer値のみ使用
             for (uint32_t i = 0; i < n; ++i) {
                 int32_t out[2]{};
                 for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPM; ++c) {
@@ -428,17 +438,19 @@ struct ChipSlot {
         case NukedTag::OPLL2:
         case NukedTag::OPLL_YM2423:
         case NukedTag::OPLL_VRC7: {
-            // libvgm準拠: 18クロックのbuffer[0]/buffer[1]を合算
+            // Nuked-OPLL: cycles=8のときCH1キャリアが出力される
+            // cycles=9のClockでout[0]に前Clock(cycles=8)の値が書かれる
+            // 72クロック/サンプル中にcycles=9は4回来るが最後の値を使用
             for (uint32_t i = 0; i < n; ++i) {
-                int32_t sum_l = 0, sum_r = 0;
+                int32_t val_m = 0, val_r = 0;
                 for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPLL; ++c) {
                     int32_t buf[2]{};
                     OPLL_Clock(&state.opll, buf);
-                    sum_l += buf[0];
-                    sum_r += buf[1];
+                    if (state.opll.cycles == 9) {
+                        val_m = buf[0]; val_r = buf[1];
+                    }
                 }
-                // melody + rhythm を合算（libvgmはmute条件で分離するが簡略化）
-                float m = std::clamp(sum_l + sum_r, -32768, 32767) * S16;
+                float m = std::clamp(val_m + val_r, -32768, 32767) * S16;
                 l[i] = r[i] = m;
             }
             break;

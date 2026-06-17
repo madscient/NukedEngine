@@ -30,6 +30,7 @@ extern "C" {
 #include <cstdio>
 #include <cmath>
 #include <vector>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <atomic>
@@ -74,6 +75,14 @@ namespace NukedClock {
     constexpr uint32_t VRC7   = 3'579'545;
     constexpr uint32_t PSG    = 3'579'545;
 }
+
+// 各チップの 1サンプルあたりのクロック数
+// OPN2: 6マスタークロック×24クロック = 144マスタークロック / サンプル
+// OPM:  2分周×32スロット = 64クロック / サンプル
+// OPLL: 4分周×18スロット = 72クロック / サンプル
+#define NUKED_CLOCKS_PER_SAMPLE_OPN2  24
+#define NUKED_CLOCKS_PER_SAMPLE_OPM   64
+#define NUKED_CLOCKS_PER_SAMPLE_OPLL  72
 
 // =========================================================
 //  LinearResampler (FmChip.h の実装と同等)
@@ -188,16 +197,16 @@ static uint32_t nativeRate(NukedTag t, uint32_t clk, uint32_t target_sr) {
         case NukedTag::OPL2:
         case NukedTag::OPL3:    return target_sr;  // 内蔵リサンプラー使用
         case NukedTag::OPN2_YM2612:
-        case NukedTag::OPN2C: return clk / 144;  // 6マスタークロック×24クロック=144
+        case NukedTag::OPN2C: return clk / (NUKED_CLOCKS_PER_SAMPLE_OPN2 * 6); // 6マスタークロック×24クロック=144マスタークロック/サンプル
         case NukedTag::OPM:
-        case NukedTag::OPP:     return clk / 64;
+        case NukedTag::OPP:     return clk / NUKED_CLOCKS_PER_SAMPLE_OPM;
         case NukedTag::OPLL:
         case NukedTag::OPLL_B:
         case NukedTag::OPLL_YMF281:
         case NukedTag::OPLLP_B:
         case NukedTag::OPLL2:
         case NukedTag::OPLL_YM2423:
-        case NukedTag::OPLL_VRC7:   return clk / 72;
+        case NukedTag::OPLL_VRC7:   return clk / NUKED_CLOCKS_PER_SAMPLE_OPLL;
         case NukedTag::PSG:     return target_sr;
         default:                return target_sr;
     }
@@ -245,6 +254,9 @@ struct ChipSlot {
     std::atomic<float> gain_l{1.0f};
     std::atomic<float> gain_r{1.0f};
     LinearResampler resampler;
+    // write_direct_full でのフルサイクルクロック消費分の出力バッファ
+    // gen_native で優先的に使用してリサンプラーとの位相ずれを防ぐ
+    std::deque<float> pre_l, pre_r;
 
     union {
         opl3_chip opl3;
@@ -273,14 +285,17 @@ struct ChipSlot {
         size_t t = q_tail.load(std::memory_order_relaxed);
         while (t != q_head.load(std::memory_order_acquire)) {
             auto& e = q_buf[t];
-            // OPL2/OPL3/PSG は WriteReg が即時完結
-            // OPN2/OPM/OPLL は write_direct_full でフルサイクル処理
-            // どちらも同一スレッド（WASAPIスレッド）から呼ばれるため競合なし
             write_direct_full(e.reg, e.value, e.port);
             t = (t + 1) % Q_CAP;
         }
         q_tail.store(t, std::memory_order_release);
     }
+
+    // OPN2/OPM/OPLL: キュー内の全エントリをフルサイクルで処理しつつ出力バッファに反映
+    // clocks_per_sample: 1サンプルあたりのクロック数
+
+    // 1クロック分の書き込み処理（gen_native の各クロック前に呼ぶ）
+    // clks_needed: アドレス確定に必要なクロック数（OPN2=1, OPM/OPLL=2）
 
 
     // 全チップ共通の書き込み処理
@@ -288,6 +303,7 @@ struct ChipSlot {
     // OPN2/OPM/OPLL: スロット/チャンネルタイミング依存のためフルサイクルのクロックを回す
     // generate() → flush() から WASAPIスレッドのみで呼ばれる（スレッド競合なし）
     void write_direct_full(uint8_t reg, uint8_t value, uint32_t port) {
+        constexpr float S16 = 1.0f / 32768.0f;
         switch (tag) {
         case NukedTag::OPL3: {
             uint16_t full = static_cast<uint16_t>((port & 1u) << 8 | reg);
@@ -297,25 +313,36 @@ struct ChipSlot {
         case NukedTag::OPL2:
             OPL2_WriteReg(&state.opl2, reg, value);
             break;
+        case NukedTag::OPN2_YM2612:
         case NukedTag::OPN2C: {
+            // YMEngine APIのport: 0=バンク0(CH1-3), 1=バンク1(CH4-6)
+            // Nuked-OPN2のwrite_data bit8: 0=バンク0, 1=バンク1
+            // port != 0 のときバンク1 (0x100) を設定
             int16_t dummy[2]{};
-            state.opn2.write_data = (uint16_t)(((port & 0x02) << 7) | reg);
+            const uint16_t bank_bit = (port != 0) ? 0x100 : 0x000;
+            state.opn2.write_data = bank_bit | reg;
             state.opn2.write_a |= 1;
-            for (int c = 0; c < 24; ++c) OPN2_Clock(&state.opn2, dummy);
+            for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPN2; ++c) OPN2_Clock(&state.opn2, dummy);
             state.opn2.write_data = value;
             state.opn2.write_d |= 1;
-            for (int c = 0; c < 24; ++c) OPN2_Clock(&state.opn2, dummy);
+            for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPN2; ++c) OPN2_Clock(&state.opn2, dummy);
             break;
         }
         case NukedTag::OPM:
         case NukedTag::OPP: {
+            // 最小クロック方式: アドレス確定に2クロック、データ確定に2クロック
+            // 残りのクロックはgen_nativeの64クロックループで自然に処理
+            // (64クロック中slot=0-31が全て2回現れるので書き込みは確実に届く)
             int32_t dummy[2]{};
+            uint8_t sh1d, sh2d;
             state.opm.write_data = reg;
             state.opm.write_a = 1;
-            for (int c = 0; c < 64; ++c) OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);
+            OPM_Clock(&state.opm, dummy, &sh1d, &sh2d, nullptr);
+            OPM_Clock(&state.opm, dummy, &sh1d, &sh2d, nullptr);
             state.opm.write_data = value;
             state.opm.write_d = 1;
-            for (int c = 0; c < 64; ++c) OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);
+            OPM_Clock(&state.opm, dummy, &sh1d, &sh2d, nullptr);
+            OPM_Clock(&state.opm, dummy, &sh1d, &sh2d, nullptr);
             break;
         }
         case NukedTag::OPLL:
@@ -325,13 +352,17 @@ struct ChipSlot {
         case NukedTag::OPLL2:
         case NukedTag::OPLL_YM2423:
         case NukedTag::OPLL_VRC7: {
+            // 同様に最小クロック方式
+            // OPLL は DoRegWrite→DoIO の順なので2クロックで確定
             int32_t dummy[2]{};
             state.opll.write_data = reg;
             state.opll.write_a |= 1;
-            for (int c = 0; c < 72; ++c) OPLL_Clock(&state.opll, dummy);
+            OPLL_Clock(&state.opll, dummy);
+            OPLL_Clock(&state.opll, dummy);
             state.opll.write_data = value;
             state.opll.write_d |= 1;
-            for (int c = 0; c < 72; ++c) OPLL_Clock(&state.opll, dummy);
+            OPLL_Clock(&state.opll, dummy);
+            OPLL_Clock(&state.opll, dummy);
             break;
         }
         case NukedTag::PSG:
@@ -343,7 +374,7 @@ struct ChipSlot {
     }
     void gen_native(float* l, float* r, uint32_t n) {
         constexpr float S16 = 1.0f / 32768.0f;
-        constexpr float S15 = 1.0f / 16384.0f;
+        constexpr float S15 = 1.0f / 16384.0f; // 未使用になるが念のため残す
         switch (tag) {
         case NukedTag::OPL3:
             for (uint32_t i = 0; i < n; ++i) {
@@ -359,38 +390,83 @@ struct ChipSlot {
             break;
         case NukedTag::OPN2_YM2612:
         case NukedTag::OPN2C:
-            // 1サンプル = 24クロック (書き込みはwrite_direct_fullで処理済み)
+            // OPN2_Clock はサイクル毎にMOL/MOR ピン状態を出力する
+            // YM2612モード: out_en = (cycles & 3) == 3 → 24クロック中6回有効
+            //               各有効クロックで異なるチャンネルの出力が出る
+            // YM3438モード: out_en = (cycles & 3) != 0 → 24クロック中18回有効
+            // 有効クロックの出力を累積して1サンプルとする
             for (uint32_t i = 0; i < n; ++i) {
-                int16_t buf[2]{};
-                for (int c = 0; c < 24; ++c) OPN2_Clock(&state.opn2, buf);
-                l[i] = buf[0] * S15; r[i] = buf[1] * S15;
+                int32_t suml = 0, sumr = 0;
+                for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPN2; ++c) {
+                    int16_t buf[2]{};
+                    OPN2_Clock(&state.opn2, buf);
+                    suml += buf[0];
+                    sumr += buf[1];
+                }
+                // 6チャンネル分の出力を合算（各CH出力は4クロック中1クロックで有効）
+                // 合計24クロックで各CHが最大1回 → 合算値をそのまま使用
+                l[i] = std::clamp(suml, -32768, 32767) * S16;
+                r[i] = std::clamp(sumr, -32768, 32767) * S16;
             }
             break;
         case NukedTag::OPM:
-        case NukedTag::OPP:
-            // 1サンプル = 64クロック
-            for (uint32_t i = 0; i < n; ++i) {
+        case NukedTag::OPP: {
+            // pre_bufを先に消費してから、sh2エッジ2回で1サンプル生成
+            uint32_t i = 0;
+            while (i < n && !pre_l.empty()) {
+                l[i] = pre_l.front(); pre_l.pop_front();
+                r[i] = pre_r.front(); pre_r.pop_front();
+                ++i;
+            }
+            uint8_t prev_sh1 = state.opm.dac_osh1;
+            uint8_t prev_sh2 = state.opm.dac_osh2;
+            int32_t last_r = 0;
+            int sh2_count = 0;
+            while (i < n) {
                 int32_t out[2]{};
-                for (int c = 0; c < 64; ++c) OPM_Clock(&state.opm, out, nullptr, nullptr, nullptr);
-                l[i] = std::clamp(out[0], -32768, 32767) * S16;
-                r[i] = std::clamp(out[1], -32768, 32767) * S16;
+                uint8_t sh1 = 0, sh2 = 0;
+                OPM_Clock(&state.opm, out, &sh1, &sh2, nullptr);
+                if (prev_sh1 && !sh1) last_r = out[1];
+                if (prev_sh2 && !sh2) {
+                    if (++sh2_count >= 2) {
+                        l[i] = std::clamp(out[0], -32768, 32767) * S16;
+                        r[i] = std::clamp(last_r, -32768, 32767) * S16;
+                        ++i;
+                        sh2_count = 0;
+                    }
+                }
+                prev_sh1 = sh1; prev_sh2 = sh2;
             }
             break;
+        }
         case NukedTag::OPLL:
         case NukedTag::OPLL_B:
         case NukedTag::OPLL_YMF281:
         case NukedTag::OPLLP_B:
         case NukedTag::OPLL2:
         case NukedTag::OPLL_YM2423:
-        case NukedTag::OPLL_VRC7:
-            // 1サンプル = 72クロック
-            for (uint32_t i = 0; i < n; ++i) {
-                int32_t out[2]{};
-                for (int c = 0; c < 72; ++c) OPLL_Clock(&state.opll, out);
-                float m = std::clamp(out[0] + out[1], -32768, 32767) * S16;
+        case NukedTag::OPLL_VRC7: {
+            // pre_bufを先に消費してから、72クロックの最後の出力を1サンプル生成
+            uint32_t i = 0;
+            while (i < n && !pre_l.empty()) {
+                l[i] = pre_l.front(); pre_l.pop_front();
+                r[i] = pre_r.front(); pre_r.pop_front();
+                ++i;
+            }
+            for (; i < n; ++i) {
+                // 72クロック = 4サイクル(各18クロック)
+                // 最後の18クロック分のoutput_m+output_rを合算して1サンプルとする
+                int32_t out[2]{}, sum = 0;
+                for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPLL; ++c) {
+                    OPLL_Clock(&state.opll, out);
+                    if (c >= NUKED_CLOCKS_PER_SAMPLE_OPLL - 18)
+                        sum += out[0] + out[1];
+                }
+                float m = std::clamp(sum, -32768, 32767) * S16;
                 l[i] = r[i] = m;
             }
             break;
+        }
         case NukedTag::PSG:
             for (uint32_t i = 0; i < n; ++i) {
                 int32_t out; YMPSG_Generate(&state.psg, &out);

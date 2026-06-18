@@ -81,7 +81,11 @@ namespace NukedClock {
 // OPM:  clock / 64 (libvgm: rate = clock / 64)
 // OPLL: clock / 72 (libvgm: rate = clock / 72)
 #define NUKED_CLOCKS_PER_SAMPLE_OPN2  24
-#define NUKED_CLOCKS_PER_SAMPLE_OPM   64
+// Nuked-OPMはsh2立ち下がり(32clk間隔)ごとにDAC出力が更新される。
+// 64clk/sampleだと1サンプル中に2回sh2↓が来るため実効周波数が2倍になる。
+// 128clk/sampleにしてsh2↓の2回に1回だけサンプルを取得することで正しい音程を得る。
+// nativeRate = clk/128 = 27965Hz
+#define NUKED_CLOCKS_PER_SAMPLE_OPM   128
 #define NUKED_CLOCKS_PER_SAMPLE_OPLL  72
 
 // =========================================================
@@ -331,17 +335,19 @@ struct ChipSlot {
         }
         case NukedTag::OPM:
         case NukedTag::OPP: {
-            // フルサイクル方式: 消費クロックをskip_samplesに換算してgen_nativeで無音スキップ
+            // フルサイクル方式: 書き込みを全スロット/チャンネルに確定させる
+            // 消費クロックをskip_samplesに換算してgen_nativeで無音スキップする
             int32_t dummy[2]{};
             state.opm.write_data = reg;
             state.opm.write_a = 1;
-            for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPM; ++c)
+            // アドレス確定: NUKED_CLOCKS_PER_SAMPLE_OPM/2クロック（= 64クロック = 全スロットをカバー）
+            for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPM / 2; ++c)
                 OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);
             state.opm.write_data = value;
             state.opm.write_d = 1;
-            for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPM; ++c)
+            for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPM / 2; ++c)
                 OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);
-            skip_samples += 2; // 64×2クロック = 2サンプル分
+            skip_samples += 2; // 128クロック消費 = 2サンプル分（nativeRate=clk/128）
             break;
         }
         case NukedTag::OPLL:
@@ -419,15 +425,36 @@ struct ChipSlot {
             break;
         case NukedTag::OPM:
         case NukedTag::OPP: {
+            // 128クロック/サンプル、sh2↓の2回に1回サンプルを取得
+            // (sh2↓は32クロック間隔、128クロック中4回来る)
+            // sh2↓のうち偶数番目の値を使用 → nativeRate=clk/128=27965Hz
+            // これによりKC=0x3e→C4(261.6Hz)等、ymfmと同じ音程が得られる
             for (uint32_t i = 0; i < n; ++i) {
-                int32_t out[2]{};
+                int32_t out_l = 0, out_r = 0;
+                uint8_t prev_sh1 = state.opm.dac_osh1;
+                uint8_t prev_sh2 = state.opm.dac_osh2;
+                int sh2_count = 0;
                 for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPM; ++c) {
                     int32_t buf[2]{};
-                    OPM_Clock(&state.opm, buf, nullptr, nullptr, nullptr);
-                    if (c == 0) { out[0] = buf[0]; out[1] = buf[1]; }
+                    uint8_t sh1 = 0, sh2 = 0;
+                    OPM_Clock(&state.opm, buf, &sh1, &sh2, nullptr);
+                    if (prev_sh2 && !sh2) {
+                        sh2_count++;
+                        if (sh2_count % 2 == 0) { // 2つおきに取得
+                            out_l = buf[0];
+                        }
+                    }
+                    if (prev_sh1 && !sh1) {
+                        // sh1↓でR確定（sh2↓の直後16クロック後）
+                        // sh2_countが偶数のものに対応するsh1↓を使う
+                        if (sh2_count % 2 == 0 && sh2_count > 0) {
+                            out_r = buf[1];
+                        }
+                    }
+                    prev_sh1 = sh1; prev_sh2 = sh2;
                 }
-                l[i] = std::clamp(out[0], -32768, 32767) * S16;
-                r[i] = std::clamp(out[1], -32768, 32767) * S16;
+                l[i] = std::clamp(out_l, -32768, 32767) * S16;
+                r[i] = std::clamp(out_r, -32768, 32767) * S16;
             }
             break;
         }
@@ -438,20 +465,20 @@ struct ChipSlot {
         case NukedTag::OPLL2:
         case NukedTag::OPLL_YM2423:
         case NukedTag::OPLL_VRC7: {
-            // Nuked-OPLL: cycles=8のときCH1キャリアが出力される
-            // cycles=9のClockでout[0]に前Clock(cycles=8)の値が書かれる
-            // 72クロック/サンプル中にcycles=9は4回来るが最後の値を使用
+            // Nuked-OPLL: 72クロックの全out[0]を合算
+            // out[0]は常に1以上（直流オフセット）なので1を引いてから合算
+            // OUTPUT_FACTOR=8でスケーリング（libvgm準拠）
+            // nativeRate=clk/72=49716Hz（全チャンネル合算で正しい周波数を再現）
+            constexpr int OUTPUT_FACTOR = 8;
+            constexpr float OPLL_SCALE = S16 * OUTPUT_FACTOR / NUKED_CLOCKS_PER_SAMPLE_OPLL;
             for (uint32_t i = 0; i < n; ++i) {
-                int32_t val_m = 0, val_r = 0;
+                int32_t sum = 0;
                 for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPLL; ++c) {
                     int32_t buf[2]{};
                     OPLL_Clock(&state.opll, buf);
-                    if (state.opll.cycles == 9) {
-                        val_m = buf[0]; val_r = buf[1];
-                    }
+                    sum += buf[0] - 1; // オフセット1を除去して合算
                 }
-                float m = std::clamp(val_m + val_r, -32768, 32767) * S16;
-                l[i] = r[i] = m;
+                l[i] = r[i] = std::clamp((float)sum * OPLL_SCALE, -1.f, 1.f);
             }
             break;
         }

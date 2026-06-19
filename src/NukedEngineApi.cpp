@@ -203,7 +203,10 @@ static uint32_t nativeRate(NukedTag t, uint32_t clk, uint32_t target_sr) {
         case NukedTag::OPN2_YM2612:
         case NukedTag::OPN2C: return clk / (NUKED_CLOCKS_PER_SAMPLE_OPN2 * 6); // 6マスタークロック×24クロック=144マスタークロック/サンプル
         case NukedTag::OPM:
-        case NukedTag::OPP:     return clk / NUKED_CLOCKS_PER_SAMPLE_OPM;
+        case NukedTag::OPP:
+            // gen_nativeはsh2↓(32clk周期)が2回来るまでクロックを回して1サンプル生成する。
+            // sh2↓2回分の波形を1サンプルとして間引くため、実効nativeRateはclk/128相当。
+            return clk / NUKED_CLOCKS_PER_SAMPLE_OPM;
         case NukedTag::OPLL:
         case NukedTag::OPLL_B:
         case NukedTag::OPLL_YMF281:
@@ -261,7 +264,8 @@ struct ChipSlot {
     // write_direct_full でのフルサイクルクロック消費分をサンプル単位でカウント
     // gen_native 冒頭でこの分だけ無音を出力してリサンプラーの位相を保つ
     uint32_t skip_samples = 0;
-
+    // OPM: sh2↓のエッジ検出状態（サンプル間をまたいで持続）
+    uint8_t opm_prev_sh2 = 0;
 
     union {
         opl3_chip opl3;
@@ -338,16 +342,22 @@ struct ChipSlot {
             // フルサイクル方式: 書き込みを全スロット/チャンネルに確定させる
             // 消費クロックをskip_samplesに換算してgen_nativeで無音スキップする
             int32_t dummy[2]{};
+            uint8_t sh1 = 0, sh2 = 0;
             state.opm.write_data = reg;
             state.opm.write_a = 1;
-            // アドレス確定: NUKED_CLOCKS_PER_SAMPLE_OPM/2クロック（= 64クロック = 全スロットをカバー）
+            // アドレス確定: 64クロック（全32スロット×2を網羅）
             for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPM / 2; ++c)
-                OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);
+                OPM_Clock(&state.opm, dummy, &sh1, &sh2, nullptr);
             state.opm.write_data = value;
             state.opm.write_d = 1;
             for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPM / 2; ++c)
-                OPM_Clock(&state.opm, dummy, nullptr, nullptr, nullptr);
-            skip_samples += 2; // 128クロック消費 = 2サンプル分（nativeRate=clk/128）
+                OPM_Clock(&state.opm, dummy, &sh1, &sh2, nullptr);
+            // gen_nativeのwhileループが使うエッジ検出状態をここでも同期させる
+            // (write_direct_fullでもOPMクロックを消費するため、sh2の最新値を反映する)
+            opm_prev_sh2 = sh2;
+            // 128クロック消費 ÷ nativeRate(clk/128)の128クロック/サンプル... ではなく
+            // 実際は64クロック×2フェーズ=128クロックで、nativeRate=clk/128なので2サンプル分
+            skip_samples += 2;
             break;
         }
         case NukedTag::OPLL:
@@ -366,7 +376,9 @@ struct ChipSlot {
             state.opll.write_d |= 1;
             for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPLL; ++c)
                 OPLL_Clock(&state.opll, dummy);
-            skip_samples += 2; // 72×2クロック = 2サンプル分
+            // 72×2=144クロック消費。gen_nativeは18クロック/サンプルなので
+            // 144/18=8サンプル分をskipする
+            skip_samples += 8;
             break;
         }
         case NukedTag::PSG:
@@ -425,33 +437,23 @@ struct ChipSlot {
             break;
         case NukedTag::OPM:
         case NukedTag::OPP: {
-            // 128クロック/サンプル、sh2↓の2回に1回サンプルを取得
-            // (sh2↓は32クロック間隔、128クロック中4回来る)
-            // sh2↓のうち偶数番目の値を使用 → nativeRate=clk/128=27965Hz
-            // これによりKC=0x3e→C4(261.6Hz)等、ymfmと同じ音程が得られる
+            // sh2↓（32クロック間隔）が2回来るたびに1サンプルを生成
+            // nativeRate = clk/128 = 27965Hz
+            // opm_prev_sh2をChipSlotメンバーとして持続させ
+            // サンプル間をまたいで正確なエッジ検出を行う
             for (uint32_t i = 0; i < n; ++i) {
                 int32_t out_l = 0, out_r = 0;
-                uint8_t prev_sh1 = state.opm.dac_osh1;
-                uint8_t prev_sh2 = state.opm.dac_osh2;
                 int sh2_count = 0;
-                for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPM; ++c) {
+                while (sh2_count < 2) {
                     int32_t buf[2]{};
                     uint8_t sh1 = 0, sh2 = 0;
                     OPM_Clock(&state.opm, buf, &sh1, &sh2, nullptr);
-                    if (prev_sh2 && !sh2) {
-                        sh2_count++;
-                        if (sh2_count % 2 == 0) { // 2つおきに取得
-                            out_l = buf[0];
-                        }
+                    if (opm_prev_sh2 && !sh2) {
+                        ++sh2_count;
+                        out_l = buf[0]; // sh2↓ごとに更新、2回目が最終値
+                        out_r = buf[1];
                     }
-                    if (prev_sh1 && !sh1) {
-                        // sh1↓でR確定（sh2↓の直後16クロック後）
-                        // sh2_countが偶数のものに対応するsh1↓を使う
-                        if (sh2_count % 2 == 0 && sh2_count > 0) {
-                            out_r = buf[1];
-                        }
-                    }
-                    prev_sh1 = sh1; prev_sh2 = sh2;
+                    opm_prev_sh2 = sh2;
                 }
                 l[i] = std::clamp(out_l, -32768, 32767) * S16;
                 r[i] = std::clamp(out_r, -32768, 32767) * S16;
@@ -465,18 +467,33 @@ struct ChipSlot {
         case NukedTag::OPLL2:
         case NukedTag::OPLL_YM2423:
         case NukedTag::OPLL_VRC7: {
-            // Nuked-OPLL: 72クロックの全out[0]を合算
-            // out[0]は常に1以上（直流オフセット）なので1を引いてから合算
-            // OUTPUT_FACTOR=8でスケーリング（libvgm準拠）
-            // nativeRate=clk/72=49716Hz（全チャンネル合算で正しい周波数を再現）
-            constexpr int OUTPUT_FACTOR = 8;
-            constexpr float OPLL_SCALE = S16 * OUTPUT_FACTOR / NUKED_CLOCKS_PER_SAMPLE_OPLL;
+            // Nuked-OPLLは18クロックサイクルの特定cyclesでのみ各チャンネルの
+            // キャリア出力(DAC値)がbuffer[0](output_m)に現れる。実測マッピング:
+            //   CH1=8, CH2=9, CH3=10, CH4=14, CH5=15, CH6=16, CH7=2, CH8=3, CH9=4
+            // リズムモード(reg0x0E bit5)有効時、BD/SD/TOM/HH/Cymの出力は
+            // buffer[1](output_r)に現れる。リズムOFF時のoutput_rはsign値(±1)の
+            // みで実質無音のため、常時合算してもメロディ専用時に影響しない。
+            // Nuked-OPLLの内部位相生成は4倍速で進むため、1サンプルあたり
+            // 実際には18クロックだけ消費する(NUKED_CLOCKS_PER_SAMPLE_OPLL=72は
+            // nativeRate計算上の値であり、ここでは使わない)。
+            // YM2413は9bit DAC(振幅±256程度)のため32768/256=128倍のゲインが必要だが、
+            // 最大9ch+リズムの合算となるため過大にならないよう正規化する。
+            constexpr int OPLL_CLOCKS_PER_SAMPLE_ACTUAL = 18;
+            constexpr float OPLL_SCALE = S16 * 128.0f / 9.0f;
             for (uint32_t i = 0; i < n; ++i) {
                 int32_t sum = 0;
-                for (int c = 0; c < NUKED_CLOCKS_PER_SAMPLE_OPLL; ++c) {
+                for (int c = 0; c < OPLL_CLOCKS_PER_SAMPLE_ACTUAL; ++c) {
                     int32_t buf[2]{};
                     OPLL_Clock(&state.opll, buf);
-                    sum += buf[0] - 1; // オフセット1を除去して合算
+                    int cy = state.opll.cycles;
+                    bool is_carrier_cycle =
+                        cy == 8 || cy == 9 || cy == 10 ||
+                        cy == 14 || cy == 15 || cy == 16 ||
+                        cy == 2 || cy == 3 || cy == 4;
+                    if (is_carrier_cycle) {
+                        sum += buf[0] - 1; // メロディch: オフセット1を除去して合算
+                    }
+                    sum += buf[1] - 1; // リズムch: 常時合算(OFF時はsign値のみで実質無音)
                 }
                 l[i] = r[i] = std::clamp((float)sum * OPLL_SCALE, -1.f, 1.f);
             }
@@ -518,8 +535,10 @@ static std::unique_ptr<ChipSlot> makeSlot(NukedTag tag, uint32_t clock, uint32_t
     case NukedTag::OPN2C:
         OPN2_SetChipType(0);
         OPN2_Reset(&s->state.opn2); break;
-    case NukedTag::OPM:  OPM_Reset(&s->state.opm, opm_flags_none);   break;
-    case NukedTag::OPP:  OPM_Reset(&s->state.opm, opm_flags_ym2164); break;
+    case NukedTag::OPM:  OPM_Reset(&s->state.opm, opm_flags_none);
+        s->opm_prev_sh2 = s->state.opm.dac_osh2;  break;
+    case NukedTag::OPP:  OPM_Reset(&s->state.opm, opm_flags_ym2164);
+        s->opm_prev_sh2 = s->state.opm.dac_osh2;  break;
     case NukedTag::OPLL:
     case NukedTag::OPLL_B:
     case NukedTag::OPLL_YMF281:

@@ -187,6 +187,67 @@ Wasapi_GetDeviceId(0, device_id, 128);
 WasapiHandle wasapi = Wasapi_CreateWithDevice(eng, 0, device_id);
 ```
 
+## sample_app による JSON 駆動テスト
+
+`example/sample_app.cpp` は、JSON ファイルでチップ初期化・発音シーケンスを記述し、  
+WASAPI でリアルタイム再生しながら検証できるテストツールです。
+
+```bash
+sample_app.exe [オプション] [file1.json] [file2.json] ...
+```
+
+| オプション | 内容 |
+|---|---|
+| (引数なし) | `patches/all.json` を使用 |
+| `file.json ...` | 指定した JSON ファイルを順に処理 (複数指定可) |
+| `-r <rate>` | サンプルレートを指定 (省略時 48000) |
+| `-d <name>` | デバイス名を部分一致で指定 (省略時デフォルトデバイス) |
+
+### JSON フォーマット
+
+```json
+{
+  "sample_rate": 48000,
+  "global": { "note_ms": 800, "rest_ms": 200 },
+  "chips": {
+    "OPL2": { "gain": 1.0, "init": [...], "channels": [...] },
+    "OPNA": { "gain_l": 0.8, "gain_r": 1.0, "init": [...], "channels": [...] },
+    "OPM":  { "$ref": "opm.json" }
+  }
+}
+```
+
+| キー | 内容 |
+|---|---|
+| `gain` | L/R 共通ゲイン (省略時 1.0) |
+| `gain_l` / `gain_r` | 左右個別ゲイン。指定時は `gain` より優先される |
+| `$ref` | 他の JSON ファイル内の同名チップ定義を参照する (下記参照) |
+
+### `$ref` によるチップ定義の外部参照
+
+`{"$ref": "other.json"}` と書くと、参照先ファイルの `chips.<同名チップ>` の定義を  
+そのまま読み込んで使用します。参照先パスは参照元ファイルからの相対パスです。
+
+```json
+// all.json
+{
+  "chips": {
+    "OPM":  { "$ref": "opm.json" },
+    "OPLL": { "$ref": "opll.json" }
+  }
+}
+```
+
+これにより、各チップ専用の JSON ファイル (`opm.json` / `opll.json` など) を単体テストにも  
+`all.json` からの一括テストにも使い回せます。`$ref` は入れ子 (参照先がさらに `$ref` を持つ) にも  
+対応していますが、循環参照は検出して警告を出しスキップします (最大ネスト深度 8)。
+
+### 注意
+
+`FmEngine_AddChip` / `FmEngine_AddExtChip` / `FmEngine_AddNukedChip` は  
+`Wasapi_Start` より前に全て完了させてください (WASAPI スレッドとの競合防止)。  
+`sample_app.cpp` は全 JSON ファイルのチップ追加を済ませてから WASAPI を開始する構成になっています。
+
 ## YMEngine との実装上の差異
 
 | 機能 | YMEngine | NukedEngine |
@@ -200,6 +261,7 @@ WasapiHandle wasapi = Wasapi_CreateWithDevice(eng, 0, device_id);
 | 外部メモリ (ADPCM/PCM) | ✅ | ❌ 未サポート |
 | 外部チップ (SSG/SCC/SAA) | ✅ (emu2149/emu2212/SAASound) | ❌ 未サポート |
 | DCSG (PSG) | ✅ (emu76489) | ✅ (Nuked-PSG) |
+| sample_app の `gain_l`/`gain_r`・`$ref` | ✅ | ✅ (本バージョンで追加) |
 
 ## OPM / OPLL のサンプリング方式について
 

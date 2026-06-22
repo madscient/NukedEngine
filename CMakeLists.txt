@@ -10,7 +10,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # -----------------------------------------------------------------------
 option(NUKEDENGINE_BUILD_SHARED  "共有ライブラリ (DLL/SO) をビルド" ON)
 option(NUKEDENGINE_BUILD_STATIC  "静的ライブラリをビルド"            ON)
-option(NUKEDENGINE_BUILD_EXAMPLE "使用例をビルド"                   ON)
 
 # -----------------------------------------------------------------------
 # Git サブモジュールの初期化チェック
@@ -46,15 +45,6 @@ foreach(_core opl3/opl3.h opl2/opl2.h opn2/ym3438.h opm/opm.h opll/opll.h psg/ym
             "  git submodule update --init --recursive")
     endif()
 endforeach()
-
-if(NUKEDENGINE_BUILD_EXAMPLE)
-    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/json/single_include/nlohmann/json.hpp")
-        message(FATAL_ERROR
-            "nlohmann/json submodule not found: deps/json\n"
-            "Please run:\n"
-            "  git submodule update --init --recursive")
-    endif()
-endif()
 
 # -----------------------------------------------------------------------
 # Nuked コアソース (git submodule として cores/ 以下に配置)
@@ -101,9 +91,7 @@ if(NUKEDENGINE_BUILD_SHARED)
         target_compile_options(NukedEngineApi PRIVATE -Wall -O2)
     endif()
 
-    if(WIN32)
-        target_link_libraries(NukedEngineApi PRIVATE avrt ole32)
-    endif()
+    # NukedEngineApi は音声出力バックエンドに依存しない
 
     set_target_properties(NukedEngineApi PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
@@ -139,36 +127,3 @@ if(NUKEDENGINE_BUILD_STATIC)
     install(TARGETS NukedEngineApi_static ARCHIVE DESTINATION lib)
 endif()
 
-# -----------------------------------------------------------------------
-# 使用例
-# -----------------------------------------------------------------------
-if(NUKEDENGINE_BUILD_EXAMPLE)
-    # nlohmann/json: deps/json サブモジュールの single_include を使用
-    set(NLOHMANN_JSON_INCLUDE "${CMAKE_SOURCE_DIR}/deps/json/single_include")
-
-    add_executable(sample_app example/sample_app.cpp)
-    target_include_directories(sample_app PRIVATE include "${NLOHMANN_JSON_INCLUDE}")
-    if(NUKEDENGINE_BUILD_SHARED)
-        target_link_libraries(sample_app PRIVATE NukedEngineApi)
-    elseif(NUKEDENGINE_BUILD_STATIC)
-        target_link_libraries(sample_app PRIVATE NukedEngineApi_static)
-        target_compile_definitions(sample_app PRIVATE NUKEDENGINE_STATIC)
-    endif()
-    set_target_properties(sample_app PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-    )
-    if(MSVC)
-        target_compile_options(sample_app PRIVATE /utf-8)
-    endif()
-    if(UNIX)
-        target_link_libraries(sample_app PRIVATE m)
-    endif()
-
-    # patches フォルダをビルド出力先にコピー
-    add_custom_command(TARGET sample_app POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_SOURCE_DIR}/example/patches"
-            "$<TARGET_FILE_DIR:sample_app>/patches"
-        COMMENT "Copying patches to output directory"
-    )
-endif()

@@ -12,7 +12,6 @@
 //   - Nuked 固有チップ (OPN2 YM3438 mode, OPP, OPLL 亜種, PSG) は
 //     FmChipTypeNuked として 0x200 以降に定義し、FmEngine_AddNukedChip() で追加する。
 //   - MSVC C2143/C2059 回避のため typedef enum / struct は extern "C" の外で定義。
-//   - Wasapi_* API は FmEngineApi.h と完全一致 (Windows 専用。非Windows は stub)。
 //
 // ビルド定義:
 //   NUKEDENGINE_EXPORTS → dllexport (DLL 本体ビルド時)
@@ -125,7 +124,6 @@ typedef enum FmChipTypeNuked {
 //  ※ extern "C" の外に置く
 // =========================================================
 struct FmEngineOpaque;
-struct WasapiOpaque;
 
 // =========================================================
 //  ハンドル typedef と関数宣言のみ extern "C" に入れる
@@ -135,7 +133,6 @@ extern "C" {
 #endif
 
 typedef struct FmEngineOpaque* FmEngineHandle;
-typedef struct WasapiOpaque*   WasapiHandle;
 
 // ----- FmEngine API (FmEngineApi.h と完全一致) -----
 
@@ -170,25 +167,11 @@ FMENGINE_API FmResult       FMENGINE_CALL FmEngine_SetMemory(
 FMENGINE_API uint32_t       FMENGINE_CALL FmEngine_GetMemorySize(
     FmEngineHandle engine, uint32_t chip_id, FmMemoryType mem_type);
 
+// 波形を生成して out_l / out_r に書き込む (float32, [-1.0, 1.0])
+// スレッドセーフ: 任意スレッドから FmEngine_Write と並行して呼び出し可能。
+// アプリケーションのオーディオコールバックからこの関数を呼び出すこと。
 FMENGINE_API FmResult       FMENGINE_CALL FmEngine_Generate(
     FmEngineHandle engine, float* out_l, float* out_r, uint32_t samples);
-
-// ----- Wasapi API (FmEngineApi.h と完全一致) -----
-
-FMENGINE_API WasapiHandle   FMENGINE_CALL Wasapi_Create(
-    FmEngineHandle engine, int exclusive);
-FMENGINE_API WasapiHandle   FMENGINE_CALL Wasapi_CreateWithDevice(
-    FmEngineHandle engine, int exclusive, const wchar_t* device_id);
-FMENGINE_API uint32_t       FMENGINE_CALL Wasapi_GetDeviceCount(void);
-FMENGINE_API FmResult       FMENGINE_CALL Wasapi_GetDeviceId(
-    uint32_t index, wchar_t* buf, uint32_t buf_len);
-FMENGINE_API FmResult       FMENGINE_CALL Wasapi_GetDeviceName(
-    uint32_t index, wchar_t* buf, uint32_t buf_len);
-FMENGINE_API int            FMENGINE_CALL Wasapi_IsDefaultDevice(uint32_t index);
-FMENGINE_API void           FMENGINE_CALL Wasapi_Destroy(WasapiHandle wasapi);
-FMENGINE_API FmResult       FMENGINE_CALL Wasapi_Start(WasapiHandle wasapi);
-FMENGINE_API FmResult       FMENGINE_CALL Wasapi_Stop(WasapiHandle wasapi);
-FMENGINE_API uint32_t       FMENGINE_CALL Wasapi_GetSampleRate(WasapiHandle wasapi);
 
 // ----- NukedEngine 拡張 API -----
 

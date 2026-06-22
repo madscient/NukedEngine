@@ -128,39 +128,38 @@ enum class NukedTag {
     PSG,
 };
 
-// FmChipType → NukedTag マッピング
-static bool fmChipTypeToNukedTag(FmChipType t, NukedTag& out) {
-    switch (t) {
-        case FM_CHIP_OPL2:  out = NukedTag::OPL2;         return true;
-        case FM_CHIP_OPL3:  out = NukedTag::OPL3;         return true;
-        case FM_CHIP_OPN2:  out = NukedTag::OPN2_YM2612;  return true;
-        case FM_CHIP_OPM:   out = NukedTag::OPM;          return true;
-        case FM_CHIP_OPLL:  out = NukedTag::OPLL;         return true;
-        case FM_CHIP_OPLLP: out = NukedTag::OPLL_YMF281;  return true;
-        case FM_CHIP_OPLLX: out = NukedTag::OPLL_YM2423;  return true;
-        case FM_CHIP_VRC7:  out = NukedTag::OPLL_VRC7;    return true;
-        // Nuked コアが対応しないチップ
-        case FM_CHIP_Y8950:
-        case FM_CHIP_OPL:
-        case FM_CHIP_OPL4:
-        case FM_CHIP_OPN:
-        case FM_CHIP_OPNA:
-        case FM_CHIP_OPNB:
-        case FM_CHIP_OPNBB:
-        case FM_CHIP_OPZ:
-        default: return false;
-    }
-}
+// =========================================================
+//  チップ名文字列 → NukedTag マッピング
+//  FmEngine_AddChip / FmEngine_Inquiry / FmEngine_GetSupportedChip で使用
+// =========================================================
+struct ChipEntry { const char* name; NukedTag tag; };
+static constexpr ChipEntry kChipTable[] = {
+    { "OPL2",    NukedTag::OPL2        },
+    { "OPL3",    NukedTag::OPL3        },
+    { "OPN2",    NukedTag::OPN2_YM2612 },
+    { "OPN2C",   NukedTag::OPN2C       },
+    { "OPM",     NukedTag::OPM         },
+    { "OPP",     NukedTag::OPP         },
+    { "OPLL",    NukedTag::OPLL        },
+    { "OPLL-B",  NukedTag::OPLL_B      },
+    { "OPLLP",   NukedTag::OPLL_YMF281 },
+    { "OPLLP-B", NukedTag::OPLLP_B     },
+    { "OPLL2",   NukedTag::OPLL2       },
+    { "OPLLX",   NukedTag::OPLL_YM2423 },
+    { "VRC7",    NukedTag::OPLL_VRC7   },
+    { "PSG",     NukedTag::PSG         },
+};
+static constexpr size_t kChipTableSize = sizeof(kChipTable) / sizeof(kChipTable[0]);
 
-static bool nukedChipTypeToTag(FmChipTypeNuked t, NukedTag& out) {
-    switch (t) {
-        case FM_NUKED_OPN2C:   out = NukedTag::OPN2C;     return true;
-        case FM_NUKED_OPP:     out = NukedTag::OPP;       return true;
-        case FM_NUKED_OPLLP_B: out = NukedTag::OPLLP_B;   return true;
-        case FM_NUKED_OPLL2:   out = NukedTag::OPLL2;     return true;
-        case FM_NUKED_OPLL_B:  out = NukedTag::OPLL_B;    return true;
-        default: return false;
+static bool nameToNukedTag(const char* name, NukedTag& out) {
+    if (!name) return false;
+    for (size_t i = 0; i < kChipTableSize; ++i) {
+        if (strcmp(kChipTable[i].name, name) == 0) {
+            out = kChipTable[i].tag;
+            return true;
+        }
     }
+    return false;
 }
 
 static uint32_t defaultClock(NukedTag t) {
@@ -567,21 +566,21 @@ struct FmEngineOpaque {
 template<typename Fn>
 static FmResult safeCall(Fn&& fn) noexcept {
     try { fn(); return FM_OK; }
+    catch (const std::bad_alloc&) {
+        fprintf(stderr, "[NukedEngine] out of memory\n");
+        return FM_ERR_ALLOC;
+    }
     catch (const std::invalid_argument& e) {
         fprintf(stderr, "[NukedEngine] invalid_argument: %s\n", e.what());
         return FM_ERR_INVALID_ARG;
     }
-    catch (const std::runtime_error& e) {
-        fprintf(stderr, "[NukedEngine] runtime_error: %s\n", e.what());
-        return FM_ERR_AUDIO;
-    }
     catch (const std::exception& e) {
         fprintf(stderr, "[NukedEngine] exception: %s\n", e.what());
-        return FM_ERR_EXCEPTION;
+        return FM_ERR_INVALID_ARG;
     }
     catch (...) {
         fprintf(stderr, "[NukedEngine] unknown exception\n");
-        return FM_ERR_EXCEPTION;
+        return FM_ERR_INVALID_ARG;
     }
 }
 
@@ -603,39 +602,22 @@ FmEngine_Destroy(FmEngineHandle h) {
     delete static_cast<FmEngineOpaque*>(h);
 }
 
-FMENGINE_API FmResult FMENGINE_CALL
-FmEngine_AddChip(FmEngineHandle h, FmChipType api_type, uint32_t clock, uint32_t* out_id) {
-    REQUIRE_PTR(h); REQUIRE_PTR(out_id);
-    NukedTag tag;
-    if (!fmChipTypeToNukedTag(api_type, tag)) return FM_ERR_INVALID_ARG;
-    return safeCall([&]{
-        auto* eng = static_cast<FmEngineOpaque*>(h);
-        *out_id = eng->addSlot(makeSlot(tag, clock, eng->sample_rate));
-    });
+FMENGINE_API uint32_t FMENGINE_CALL
+FmEngine_Inquiry(FmEngineHandle /*h*/) {
+    return static_cast<uint32_t>(kChipTableSize);
+}
+
+FMENGINE_API const char* FMENGINE_CALL
+FmEngine_GetSupportedChip(FmEngineHandle /*h*/, uint32_t index) {
+    if (index >= kChipTableSize) return nullptr;
+    return kChipTable[index].name;
 }
 
 FMENGINE_API FmResult FMENGINE_CALL
-FmEngine_AddExtChip(FmEngineHandle h, FmChipTypeExt type,
-                    uint32_t clock, uint32_t* out_id) {
-    REQUIRE_PTR(h); REQUIRE_PTR(out_id);
-    // FM_CHIP_EXT_DCSG のみ Nuked-PSG (YM7101) でサポート
-    if (type == FM_CHIP_EXT_DCSG) {
-        return safeCall([&]{
-            auto* eng = static_cast<FmEngineOpaque*>(h);
-            *out_id = eng->addSlot(makeSlot(NukedTag::PSG, clock, eng->sample_rate));
-        });
-    }
-    // SSG / SCC / SAA は未サポート
-    fprintf(stderr, "[NukedEngine] FmEngine_AddExtChip: type %d not supported\n",
-            static_cast<int>(type));
-    return FM_ERR_INVALID_ARG;
-}
-
-FMENGINE_API FmResult FMENGINE_CALL
-FmEngine_AddNukedChip(FmEngineHandle h, FmChipTypeNuked type, uint32_t clock, uint32_t* out_id) {
+FmEngine_AddChip(FmEngineHandle h, const char* name, uint32_t clock, uint32_t* out_id) {
     REQUIRE_PTR(h); REQUIRE_PTR(out_id);
     NukedTag tag;
-    if (!nukedChipTypeToTag(type, tag)) return FM_ERR_INVALID_ARG;
+    if (!nameToNukedTag(name, tag)) return FM_ERR_UNKNOWN_CHIP;
     return safeCall([&]{
         auto* eng = static_cast<FmEngineOpaque*>(h);
         *out_id = eng->addSlot(makeSlot(tag, clock, eng->sample_rate));
@@ -699,7 +681,7 @@ FmEngine_SetMemory(FmEngineHandle /*h*/, uint32_t /*chip_id*/,
                    FmMemoryType /*mem_type*/, const uint8_t* /*data*/, uint32_t /*size*/) {
     // Nuked コアは外部メモリ未サポート
     fprintf(stderr, "[NukedEngine] FmEngine_SetMemory: not supported\n");
-    return FM_ERR_INVALID_ARG;
+    return FM_ERR_UNAVAILABLE;
 }
 
 FMENGINE_API uint32_t FMENGINE_CALL

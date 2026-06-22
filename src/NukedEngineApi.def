@@ -1,14 +1,15 @@
 ; NukedEngineApi.def
 ; MSVC エクスポート定義ファイル。
-; FmEngineApi.def と同一シンボルに加え NukedEngine 拡張を追加。
+; FmEngineApi.def と完全一致させる。
 
 LIBRARY NukedEngineApi
 
 EXPORTS
     FmEngine_Create
     FmEngine_Destroy
+    FmEngine_Inquiry
+    FmEngine_GetSupportedChip
     FmEngine_AddChip
-    FmEngine_AddExtChip
     FmEngine_GetChipName
     FmEngine_GetNativeRate
     FmEngine_GetSampleRate
@@ -18,4 +19,3 @@ EXPORTS
     FmEngine_SetMemory
     FmEngine_GetMemorySize
     FmEngine_Generate
-    FmEngine_AddNukedChip

@@ -40,29 +40,6 @@ extern "C" {
 
 
 
-// =========================================================
-//  標準クロック定数 (FmChip.h の FmClock:: と同値)
-// =========================================================
-namespace NukedClock {
-    constexpr uint32_t Y8950  = 3'579'545;
-    constexpr uint32_t OPL    = 3'579'545;
-    constexpr uint32_t OPL2   = 3'579'545;
-    constexpr uint32_t OPL3   = 14'318'180;
-    constexpr uint32_t OPL4   = 33'868'800;
-    constexpr uint32_t OPN    = 3'993'600;
-    constexpr uint32_t OPNA   = 7'987'200;
-    constexpr uint32_t OPNB   = 8'000'000;
-    constexpr uint32_t OPNBB  = 8'000'000;
-    constexpr uint32_t OPN2   = 7'670'453;
-    constexpr uint32_t OPM    = 3'579'545;
-    constexpr uint32_t OPLL   = 3'579'545;
-    constexpr uint32_t OPLLP  = 3'579'545;
-    constexpr uint32_t OPLLX  = 3'579'545;
-    constexpr uint32_t OPZ    = 3'579'545;
-    constexpr uint32_t VRC7   = 3'579'545;
-    constexpr uint32_t PSG    = 3'579'545;
-}
-
 // 各チップの 1サンプルあたりのクロック数（libvgm device_start より）
 // OPN2: 6マスタークロック×24クロック = 144マスタークロック / サンプル
 // OPM:  clock / 64 (libvgm: rate = clock / 64)
@@ -160,26 +137,6 @@ static bool nameToNukedTag(const char* name, NukedTag& out) {
         }
     }
     return false;
-}
-
-static uint32_t defaultClock(NukedTag t) {
-    switch (t) {
-        case NukedTag::OPL2:         return NukedClock::OPL2;
-        case NukedTag::OPL3:         return NukedClock::OPL3;
-        case NukedTag::OPN2_YM2612:
-        case NukedTag::OPN2C:        return NukedClock::OPN2;
-        case NukedTag::OPM:
-        case NukedTag::OPP:          return NukedClock::OPM;
-        case NukedTag::OPLL:
-        case NukedTag::OPLL_B:
-        case NukedTag::OPLL_YMF281:
-        case NukedTag::OPLLP_B:
-        case NukedTag::OPLL2:
-        case NukedTag::OPLL_YM2423:
-        case NukedTag::OPLL_VRC7:    return NukedClock::OPLL;
-        case NukedTag::PSG:          return NukedClock::PSG;
-        default:                     return 3'579'545;
-    }
 }
 
 static uint32_t nativeRate(NukedTag t, uint32_t clk, uint32_t target_sr) {
@@ -563,7 +520,7 @@ struct ChipSlot {
 static std::unique_ptr<ChipSlot> makeSlot(NukedTag tag, uint32_t clock, uint32_t sr) {
     auto s = std::make_unique<ChipSlot>();
     s->tag         = tag;
-    s->clock_hz    = clock ? clock : defaultClock(tag);
+    s->clock_hz    = clock;
     s->native_rate_hz = nativeRate(tag, s->clock_hz, sr);
     s->resampler.setup(s->native_rate_hz, sr);
     for (uint32_t p = 0; p < kPartCount; ++p) {
@@ -675,6 +632,7 @@ FmEngine_GetSupportedChip(FmEngineHandle /*h*/, uint32_t index) {
 FMENGINE_API FmResult FMENGINE_CALL
 FmEngine_AddChip(FmEngineHandle h, const char* name, uint32_t clock, uint32_t* out_id) {
     REQUIRE_PTR(h); REQUIRE_PTR(out_id);
+    if (clock == 0) return FM_ERR_INVALID_ARG;
     NukedTag tag;
     if (!nameToNukedTag(name, tag)) return FM_ERR_UNKNOWN_CHIP;
     return safeCall([&]{

@@ -2,6 +2,54 @@
 
 開発経緯の記録。現在の仕様は `README.md` を参照。
 
+## FmEngine_AddChip の clock=0（標準クロック）廃止に追従する
+
+従った仕様：FMEngineTest `866f4a3` の `docs/FmEngineApi.md`。`FmEngine_AddChip` は
+clock=0 を `FM_ERR_INVALID_ARG` で拒否し、エンジンは既定のクロックを持たない。
+
+- 既定クロックの定数表と `defaultClock()` を削除した
+- 判定の順序は、ポインタ → clock → チップ名。未知の名前で clock=0 なら
+  `FM_ERR_INVALID_ARG` を返す。仕様は順序を定めておらず、こちらで決めた
+
+FMEngineTest `c0589c1`（外部メモリの規則の明確化）も読んだ。変更は要らない。
+`FmEngine_SetMemory` は `data` に触れない。`FmEngine_SetMemoryEx` のエクスポートは
+「外部メモリのバスが外に出ているチップを扱うエンジンにお勧め」とされ、NukedEngine は
+該当しないが、常に `FM_ERR_INVALID_ARG` を返すスタブのエクスポートは続ける
+（仕様上どちらでも準拠する）。
+
+### 確認
+
+**確認済み**（MSVC 2019 x64 Release、`FmEngine_*` を呼ぶハーネス、48 kHz）：
+
+- clock=0 で `FM_ERR_INVALID_ARG`、チップは追加されず `out_id` も書き換わらない。
+  未知の名前は clock=0 なら `FM_ERR_INVALID_ARG`、clock を渡せば
+  `FM_ERR_UNKNOWN_CHIP`
+- 変更前の既定値と同じ clock を明示して鳴らした出力は、変更前に clock=0 で鳴らした
+  出力とビット単位で一致する（部位ゲインの確認と同じ 10 ケース）
+- clock を 2 倍にすると、OPN2 / OPN2C / OPM / OPP は音程がちょうど 2 倍になる。
+  OPLL 系 7 型番も出力が変わる
+
+### 未解決（この変更の前からある。直していない）
+
+- OPL2 / OPL3 は clock を出力に反映しない。**確認済み**：clock を 2 倍にしても
+  出力がビット単位で一致する。`OPL2_Reset` / `OPL3_Reset` にはサンプルレートしか
+  渡しておらず、コアは内部レートを 49,716 Hz に固定している（コードを読んだ）。
+  直す案：`Reset` に「サンプルレート × 49,716 × (OPL3 は 288、OPL2 は 72) ÷ clock」
+  を渡す。標準クロックでは整数に丸めると元のサンプルレートと同じになる
+  （**未検証**：計算しただけ）
+- PSG は clock を出力に反映せず、出力サンプルレートの 16 倍のクロックで動く。
+  **確認済み**：48 kHz でトーン周期 256 の音が 93.75 Hz（= 48,000 × 16 ÷ 32 ÷ 256）。
+  clock が 3,579,545 なら 436.96 Hz のはずで、clock を 2 倍にしても 93.75 Hz のまま。
+  `nativeRate()` が出力サンプルレートを返し、16 クロック進める `YMPSG_Generate` を
+  出力 1 サンプルに 1 回呼んでいるため（コードを読んだ）
+- PSG は、1 回の `FmEngine_Generate` の前に書いた値のうち最後の 1 バイトしか
+  反映されない。**確認済み**：3 バイトをまとめて書くと無音、書き込みごとに
+  1 サンプル生成を挟むと鳴る。`YMPSG_Write` は値を 1 つ保持して次のクロックで
+  取り込むだけで、`flush()` がクロックを挟まずに続けて呼ぶため（コードを読んだ）
+- チップ名 `PSG`（YM7101、SN76489 系の DCSG）は、FMEngineTest のパッチのチップ名
+  （SN76489 系は `DCSG`、YM2149 は `SSG`）のどちらとも一致しない。FMEngineTest からは
+  NukedEngine の PSG が鳴らされない
+
 ## FmEngineApi の改訂に追従する（部位ゲイン、FmEngine_SetMemoryEx）
 
 従った仕様：FMEngineTest `e002890` の `docs/FmEngineApi.md`。参照実装は

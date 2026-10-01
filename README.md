@@ -48,7 +48,8 @@ FMEngineTest の `patches/opna.json` 等 ADPCM を使うパッチは ADPCM 部�
 
 ## 対応チップ
 
-チップは文字列名で指定します。`FmEngine_Inquiry()` で一覧取得、`FmEngine_AddChip()` で追加します。
+チップは文字列名で指定します。`FmEngine_Inquiry()` で一覧取得、`FmEngine_AddChip()` で追加します。  
+`FmEngine_AddChip()` にはマスタークロック (Hz) を必ず指定します。既定のクロックは無く、0 を渡すと `FM_ERR_INVALID_ARG` を返します。
 
 | 名前 | チップ | バックエンド | コアライセンス |
 |---|---|---|---|
@@ -66,6 +67,12 @@ FMEngineTest の `patches/opna.json` 等 ADPCM を使うパッチは ADPCM 部�
 | `"OPLLX"` | YM2423 | Nuked-OPLL | **GPL-2.0** |
 | `"VRC7"` | DS1001 | Nuked-OPLL | **GPL-2.0** |
 | `"PSG"` | YM7101 (DCSG) | Nuked-PSG | **GPL-2.0** |
+
+### 既知の制限
+
+- `"OPL2"` / `"OPL3"` は clock を出力に反映しません。OPL2 は 3,579,545 Hz 相当、OPL3 は 14,318,180 Hz 相当で動作します。
+- `"PSG"` は clock を出力に反映せず、出力サンプルレートの 16 倍のクロックで動作するため音程が正しくありません。  
+  また、1 回の `FmEngine_Generate()` の前に書き込んだ値は、最後の 1 バイトしか反映されません。
 
 未知の名前を渡すと `FM_ERR_UNKNOWN_CHIP` を返します。
 
@@ -196,12 +203,12 @@ for (uint32_t i = 0; i < n; ++i)
 
 // チップを追加 (オーディオストリーム開始前に全て追加すること)
 uint32_t opl3_id;
-FmEngine_AddChip(eng, "OPL3", 0, &opl3_id);   // 文字列で指定
+FmEngine_AddChip(eng, "OPL3", 14318180, &opl3_id);   // 文字列とマスタークロック (Hz) で指定
 FmEngine_SetGain(eng, opl3_id, 1.0f, 1.0f);
 
 // 複数チップの同時追加も可能
 uint32_t opm_id;
-FmEngine_AddChip(eng, "OPM", 0, &opm_id);
+FmEngine_AddChip(eng, "OPM", 3579545, &opm_id);
 
 // レジスタ書き込み (任意スレッドからスレッドセーフ)
 FmEngine_Write(eng, opl3_id, 0x05, 0x01, 1); // OPL3 enable

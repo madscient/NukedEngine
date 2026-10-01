@@ -11,7 +11,8 @@ Nuked-OPLL および Nuked-PSG が GPL-2.0 であるため、本プロジェク�
 
 ## YMEngine / FMEngineTest との互換性
 
-`NukedEngineApi.dll` は `FmEngineApi.dll` と同一のエクスポートシンボルを持ちます。  
+`NukedEngineApi.dll` は [FmEngineApi 仕様](https://github.com/madscient/FMEngineTest/blob/main/docs/FmEngineApi.md)の  
+必須シンボルと任意シンボルをすべてエクスポートします。  
 FMEngineTest の `-e` オプションで差し替えるだけで、パッチ JSON を変更せずに  
 Nuked コアで再生できます。
 
@@ -21,23 +22,26 @@ FMEngineTest.exe -e NukedEngineApi.dll patches/opm.json
 
 静的リンク時は `NukedEngineApi.h` の include を `FmEngineApi.h` の代わりに使用してください。
 
-| 項目 | FmEngineApi (YMEngine) | NukedEngineApi |
+| 項目 | FmEngineApi (仕様・YMEngine) | NukedEngineApi |
 |---|---|---|
 | ヘッダー | `FmEngineApi.h` | `NukedEngineApi.h` |
-| 関数名・シグネチャ | `FmEngine_*` 14 関数 | **完全一致** |
+| 関数名・シグネチャ | `FmEngine_*` 必須 14 + 任意 4 関数 | **完全一致** |
 | ハンドル型 | `FmEngineHandle` | **完全一致** |
 | エラーコード | `FM_OK` / `FM_ERR_*` | **完全一致** |
 | チップ指定方法 | 文字列 (`"OPM"`, `"OPLL"` 等) | **完全一致** |
-| `FmMemoryType` 値 | `FM_MEM_ADPCM_A/B`, `FM_MEM_PCM` | **完全一致** (未サポート) |
-| エクスポートシンボル数 | 14 | **14 (完全一致)** |
+| `FmMemoryType` / `FmMemoryAccess` 値 | `FM_MEM_*` / `FM_ACCESS_*` | **完全一致** (未サポート) |
+| `FmPart` 値 | `FM_PART_*` | **完全一致** |
+| エクスポートシンボル数 | 18 (必須 14 + 任意 4) | **18 (完全一致)** |
 
 ### 未サポート機能
 
-以下は YMEngine にあり NukedEngine では対応していません。
+以下は FmEngineApi 仕様にあり NukedEngine では対応していません。  
+NukedEngine のチップはどれも外部メモリを持たないためです。
 
 | 機能 | 戻り値 |
 |---|---|
 | `FmEngine_SetMemory` / `FmEngine_GetMemorySize` (ADPCM/PCM ROM/RAM) | `FM_ERR_UNAVAILABLE` / `0` |
+| `FmEngine_SetMemoryEx` (ROM/RAM を区別した割り当て) | `FM_ERR_INVALID_ARG` |
 
 FMEngineTest の `patches/opna.json` 等 ADPCM を使うパッチは ADPCM 部分が無音になります。  
 それ以外のパッチはそのまま動作します。
@@ -65,6 +69,27 @@ FMEngineTest の `patches/opna.json` 等 ADPCM を使うパッチは ADPCM 部�
 
 未知の名前を渡すと `FM_ERR_UNKNOWN_CHIP` を返します。
 
+## 部位ごとのゲイン
+
+`FmEngine_SetPartGain` / `FmEngine_GetPartGain` で、チップが別々の端子から出す出力 (部位) ごとに  
+L/R のゲインを設定できます。実際に掛かるゲインは `FmEngine_SetGain` のゲイン × 部位のゲインです。  
+チップが持つ部位は `FmEngine_GetPartMask` で取得できます (bit n = `FmPart` の n 番)。
+
+| 部位 | 対象チップ | 内容 | 既定値 |
+|---|---|---|---|
+| `FM_PART_OPLL_MELODY` | OPLL, OPLL-B, OPLLP, OPLLP-B, OPLL2, OPLLX, VRC7 | メロディ (MO 端子) | 1.0 |
+| `FM_PART_OPLL_RHYTHM` | OPLL, OPLL-B, OPLLP, OPLLP-B, OPLL2, OPLLX, VRC7 | リズム (RO 端子) | 1.0 |
+| `FM_PART_OPL3_AB` | OPL3 | 出力 A (L) / B (R) | 1.0 |
+| `FM_PART_OPL3_CD` | OPL3 | 出力 C (L) / D (R) | 0 |
+
+- OPL2 / OPN2 / OPN2C / OPM / OPP / PSG は部位を持ちません。ゲインは `FmEngine_SetGain` で設定します。
+- チップが持たない部位を指定すると `FM_ERR_INVALID_ARG` を返します。
+- `FM_PART_OPL3_CD` の既定値が 0 なのは、FM の出力先を A/B/C/D 全部にしたチャンネルが A/B と C/D に  
+  同じ音を出し、混ぜると二重に足されるためです。
+- OPLL 系の端子は、音を出していないときも最下位ビット数個分の無音レベルを出します。  
+  片方の部位を 0 にしても、もう片方の端子の無音レベル (フルスケールの 1% 未満の、ほぼ直流の成分) が残ります。
+- VRC7 はリズム部を持たないため、`FM_PART_OPLL_RHYTHM` には無音レベルの直流成分だけが出ます。
+
 > **ライセンスについて**: 各 Nuked コアの著作権は [Nuke.YKT](https://github.com/nukeykt) 氏にあります。  
 > Nuked-OPLL と Nuked-PSG が GPL-2.0 であるため、それらを組み込む本プロジェクト全体を  
 > **GNU General Public License v2.0** で配布します。  
@@ -75,11 +100,10 @@ FMEngineTest の `patches/opna.json` 等 ADPCM を使うパッチは ADPCM 部�
 
 ```
 NukedEngine/
-├── include/
-│   └── NukedEngineApi.h       ← 公開ヘッダー (FmEngineApi.h 互換)
 ├── src/
+│   ├── NukedEngineApi.h       ← 公開ヘッダー (FmEngineApi.h 互換)
 │   ├── NukedEngineApi.cpp     ← 実装
-│   └── NukedEngineApi.def     ← MSVC エクスポート定義 (FmEngineApi.def と同一シンボル)
+│   └── NukedEngineApi.def     ← MSVC エクスポート定義 (FmEngineApi 仕様の必須・任意シンボル)
 ├── CMakeLists.txt
 └── cores/                     ← Nuked コア (git submodule)
     ├── opl3/  (Nuked-OPL3)
@@ -207,7 +231,8 @@ FmEngine_Destroy(eng);
 | スレッド安全性 | SPSC ライトキュー | **同一** |
 | オーディオ出力 | DLL 自体は出力しない（アプリが担当） | **同一** |
 | ソフトクリップ | `FmEngine::generate()` 内で適用 | `FmEngine_Generate()` では**非適用** |
-| 外部メモリ (ADPCM/PCM) | ✅ | ❌ (`FM_ERR_UNAVAILABLE`) |
+| 部位ごとのゲイン | OPN 系 / OPLL 系 / OPL3 / OPL4 | OPLL 系 / OPL3 |
+| 外部メモリ (ADPCM/PCM) | ✅ | ❌ (`FM_ERR_UNAVAILABLE`、`FmEngine_SetMemoryEx` は `FM_ERR_INVALID_ARG`) |
 | 対応チップ数 | 多数 (ymfm 対応チップ全て) | 14 種 (Nuked コアが対応するもののみ) |
 
 ## OPM / OPLL のサンプリング方式について
@@ -250,6 +275,8 @@ NukedEngine では以下の方式でこれを補正し、ymfm (YMEngine) と同�
 - リズムモード (reg `0x0E` bit5) 使用時、BD/SD/TOM/HH/Cymbal の出力はメロディチャンネルとは別に  
   `buffer[1]` (output_r) に現れる。リズムモード OFF 時の `output_r` は符号のみのダミー値で実質無音のため、  
   常時加算してもメロディ専用利用時の音質には影響しない。
+- `buffer[0]` の合算をメロディ部位、`buffer[1]` の合算をリズム部位とし、それぞれに部位のゲインを掛けてから  
+  L/R に混ぜる。部位のゲインが既定値 (1.0) のときの出力は、2 つを合算してから正規化した場合と同じになる。
 - YM2413 は 9bit DAC (出力振幅 ±256 程度) のため、16bit フルスケールに正規化するには  
   128 倍 (`32768/256`) のゲインが必要。最大 9 チャンネル分を合算するため、チャンネル数で除算して  
   クリッピングを防いでいる。

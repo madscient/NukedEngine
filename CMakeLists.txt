@@ -64,7 +64,7 @@ set(ENGINE_SOURCES
 )
 
 set(ENGINE_INCLUDES
-    include
+    src
     cores/opl3
     cores/opl2
     cores/opn2
@@ -97,7 +97,7 @@ if(NUKEDENGINE_BUILD_SHARED)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-        PUBLIC_HEADER "include/NukedEngineApi.h"
+        PUBLIC_HEADER "src/NukedEngineApi.h"
     )
     install(TARGETS NukedEngineApi
         RUNTIME DESTINATION bin

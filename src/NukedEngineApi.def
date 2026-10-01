@@ -1,6 +1,6 @@
 ; NukedEngineApi.def
 ; MSVC エクスポート定義ファイル。
-; FmEngineApi.def と完全一致させる。
+; FmEngineApi 仕様 (FMEngineTest docs/FmEngineApi.md) の必須・任意シンボルをすべて載せる。
 
 LIBRARY NukedEngineApi
 
@@ -16,6 +16,10 @@ EXPORTS
     FmEngine_Write
     FmEngine_SetGain
     FmEngine_GetGain
+    FmEngine_SetPartGain
+    FmEngine_GetPartGain
+    FmEngine_GetPartMask
     FmEngine_SetMemory
     FmEngine_GetMemorySize
+    FmEngine_SetMemoryEx
     FmEngine_Generate

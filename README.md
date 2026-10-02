@@ -66,15 +66,11 @@ FMEngineTest の `patches/opna.json` 等 ADPCM を使うパッチは ADPCM 部�
 | `"OPLL2"` | YM2420 | Nuked-OPLL | **GPL-2.0** |
 | `"OPLLX"` | YM2423 | Nuked-OPLL | **GPL-2.0** |
 | `"VRC7"` | DS1001 | Nuked-OPLL | **GPL-2.0** |
-| `"PSG"` | YM7101 (DCSG) | Nuked-PSG | **GPL-2.0** |
-
-### 既知の制限
-
-- `"OPL2"` / `"OPL3"` は clock を出力に反映しません。OPL2 は 3,579,545 Hz 相当、OPL3 は 14,318,180 Hz 相当で動作します。
-- `"PSG"` は clock を出力に反映せず、出力サンプルレートの 16 倍のクロックで動作するため音程が正しくありません。  
-  また、1 回の `FmEngine_Generate()` の前に書き込んだ値は、最後の 1 バイトしか反映されません。
+| `"DCSG"` | YM7101 (SN76489 系 DCSG) | Nuked-PSG | **GPL-2.0** |
 
 未知の名前を渡すと `FM_ERR_UNKNOWN_CHIP` を返します。
+
+`"DCSG"` への書き込みは `reg` と `port` を使わず、`value` をチップに送るバイトとして扱います。
 
 ## 部位ごとのゲイン
 
@@ -89,7 +85,7 @@ L/R のゲインを設定できます。実際に掛かるゲインは `FmEngine
 | `FM_PART_OPL3_AB` | OPL3 | 出力 A (L) / B (R) | 1.0 |
 | `FM_PART_OPL3_CD` | OPL3 | 出力 C (L) / D (R) | 0 |
 
-- OPL2 / OPN2 / OPN2C / OPM / OPP / PSG は部位を持ちません。ゲインは `FmEngine_SetGain` で設定します。
+- OPL2 / OPN2 / OPN2C / OPM / OPP / DCSG は部位を持ちません。ゲインは `FmEngine_SetGain` で設定します。
 - チップが持たない部位を指定すると `FM_ERR_INVALID_ARG` を返します。
 - `FM_PART_OPL3_CD` の既定値が 0 なのは、FM の出力先を A/B/C/D 全部にしたチャンネルが A/B と C/D に  
   同じ音を出し、混ぜると二重に足されるためです。
@@ -175,7 +171,7 @@ Engine loaded.
 
 Sample rate: 48000 Hz
 
-Supported chips (14): OPL2 OPL3 OPN2 OPN2C OPM OPP OPLL OPLL-B OPLLP OPLLP-B OPLL2 OPLLX VRC7 PSG
+Supported chips (14): OPL2 OPL3 OPN2 OPN2C OPM OPP OPLL OPLL-B OPLLP OPLLP-B OPLL2 OPLLX VRC7 DCSG
 
 ...
 ```
@@ -233,7 +229,7 @@ FmEngine_Destroy(eng);
 | 機能 | YMEngine | NukedEngine |
 |---|---|---|
 | FM コア | ymfm (cycle-approximate) | Nuked (cycle-accurate) |
-| リサンプリング | LinearResampler (線形補間) | 同等の LinearResampler を内蔵 |
+| リサンプリング | LinearResampler (線形補間) | 同等の LinearResampler を内蔵。OPL2/OPL3 はコア内蔵の補間、DCSG は区間平均 |
 | マルチチップ | 複数 AddChip → Generate で合算 | **同一** |
 | スレッド安全性 | SPSC ライトキュー | **同一** |
 | オーディオ出力 | DLL 自体は出力しない（アプリが担当） | **同一** |

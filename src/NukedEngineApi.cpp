@@ -51,6 +51,13 @@ extern "C" {
 // nativeRate = clk/128 = 27965Hz
 #define NUKED_CLOCKS_PER_SAMPLE_OPM   128
 #define NUKED_CLOCKS_PER_SAMPLE_OPLL  72
+#define NUKED_CLOCKS_PER_SAMPLE_OPL2  72
+#define NUKED_CLOCKS_PER_SAMPLE_OPL3  288
+// YMPSG_Generate は 16 クロック進めて 1 サンプルを返す
+#define NUKED_CLOCKS_PER_SAMPLE_DCSG  16
+// Nuked-PSG の YMPSG_WriteBuffered が書き込み同士の間に空けるクロック数 (YMPSG_WRITEBUF_DELAY) と同じ
+#define NUKED_CLOCKS_PER_WRITE_DCSG   8
+#define NUKED_CLOCKS_AFTER_INIT_DCSG  32
 
 // =========================================================
 //  LinearResampler (FmChip.h の実装と同等)
@@ -92,6 +99,37 @@ private:
 };
 
 // =========================================================
+//  AreaResampler (モノラル、ネイティブ列を 0 次ホールドとみなして区間平均)
+//  DCSG はネイティブレート (clock / 16) が出力レートの数倍あり、矩形波の高調波の
+//  折り返しを LinearResampler の点サンプリングより抑えるため、出力 1 サンプルの区間に
+//  入るネイティブサンプルを重なりの長さで重み付けして平均する。
+// =========================================================
+class AreaResampler {
+public:
+    // step: 出力 1 サンプルあたりのネイティブサンプル数
+    void setup(double step) { m_step = step; m_used = 1.0; m_cur = 0.0f; }
+
+    template<typename Fn>
+    void process(Fn&& gen_one, float* out, uint32_t dst_n) {
+        for (uint32_t i = 0; i < dst_n; ++i) {
+            double remaining = m_step, acc = 0.0;
+            while (remaining > 0.0) {
+                if (m_used >= 1.0) { m_cur = gen_one(); m_used = 0.0; }
+                const double take = std::min(1.0 - m_used, remaining);
+                acc += m_cur * take;
+                m_used += take;
+                remaining -= take;
+            }
+            out[i] = static_cast<float>(acc / m_step);
+        }
+    }
+private:
+    double m_step = 1.0;
+    double m_used = 1.0;   // 現在のネイティブサンプルのうち消費済みの割合
+    float  m_cur = 0.0f;
+};
+
+// =========================================================
 //  ChipSlot – 1チップ分の状態
 // =========================================================
 
@@ -102,7 +140,7 @@ enum class NukedTag {
     OPM, OPP,
     OPLL, OPLL_B, OPLLP_B, OPLL2,
     OPLL_YMF281, OPLL_YM2423, OPLL_VRC7,
-    PSG,
+    DCSG,
 };
 
 // =========================================================
@@ -124,7 +162,7 @@ static constexpr ChipEntry kChipTable[] = {
     { "OPLL2",   NukedTag::OPLL2       },
     { "OPLLX",   NukedTag::OPLL_YM2423 },
     { "VRC7",    NukedTag::OPLL_VRC7   },
-    { "PSG",     NukedTag::PSG         },
+    { "DCSG",    NukedTag::DCSG        },
 };
 static constexpr size_t kChipTableSize = sizeof(kChipTable) / sizeof(kChipTable[0]);
 
@@ -139,10 +177,10 @@ static bool nameToNukedTag(const char* name, NukedTag& out) {
     return false;
 }
 
-static uint32_t nativeRate(NukedTag t, uint32_t clk, uint32_t target_sr) {
+static uint32_t nativeRate(NukedTag t, uint32_t clk) {
     switch (t) {
-        case NukedTag::OPL2:
-        case NukedTag::OPL3:    return target_sr;  // 内蔵リサンプラー使用
+        case NukedTag::OPL2:    return clk / NUKED_CLOCKS_PER_SAMPLE_OPL2;
+        case NukedTag::OPL3:    return clk / NUKED_CLOCKS_PER_SAMPLE_OPL3;
         case NukedTag::OPN2_YM2612:
         case NukedTag::OPN2C: return clk / (NUKED_CLOCKS_PER_SAMPLE_OPN2 * 6); // 6マスタークロック×24クロック=144マスタークロック/サンプル
         case NukedTag::OPM:
@@ -157,9 +195,19 @@ static uint32_t nativeRate(NukedTag t, uint32_t clk, uint32_t target_sr) {
         case NukedTag::OPLL2:
         case NukedTag::OPLL_YM2423:
         case NukedTag::OPLL_VRC7:   return clk / NUKED_CLOCKS_PER_SAMPLE_OPLL;
-        case NukedTag::PSG:     return target_sr;
-        default:                return target_sr;
+        case NukedTag::DCSG:    return clk / NUKED_CLOCKS_PER_SAMPLE_DCSG;
     }
+    return 0;
+}
+
+// Nuked-OPL2/OPL3 は内部レートを 49716 Hz (標準クロックでの clock / 72, clock / 288) に固定し、
+// Reset に渡したサンプルレートとの比で内蔵リサンプラーを回す。clock を反映するため、内部レートが
+// clock / div だったときと同じ比になるサンプルレートを渡す。
+static uint32_t oplResetRate(uint32_t sr, uint32_t clock, uint32_t div) {
+    const uint64_t r = (static_cast<uint64_t>(sr) * 49716u * div + clock / 2) / clock;
+    // 上限: コアが samplerate << 10 を uint32_t で計算する。
+    // 下限: コアの rateratio が 0 になると生成ループが終わらない。
+    return static_cast<uint32_t>(std::clamp<uint64_t>(r, 49, UINT32_MAX >> 10));
 }
 
 static const char* chipName(NukedTag t) {
@@ -177,7 +225,7 @@ static const char* chipName(NukedTag t) {
         case NukedTag::OPLL2:       return "OPLL2 (YM2420)";
         case NukedTag::OPLL_YM2423: return "OPLLX (YM2423)";
         case NukedTag::OPLL_VRC7:   return "VRC7 (DS1001)";
-        case NukedTag::PSG:         return "PSG (YM7101)";
+        case NukedTag::DCSG:        return "DCSG (YM7101)";
         default:                    return "Unknown";
     }
 }
@@ -248,6 +296,7 @@ struct ChipSlot {
     std::atomic<float> part_gain_l[kPartCount]{};
     std::atomic<float> part_gain_r[kPartCount]{};
     LinearResampler resampler;
+    AreaResampler   area_resampler;  // DCSG 専用
     // write_direct_full でのフルサイクルクロック消費分をサンプル単位でカウント
     // gen_native 冒頭でこの分だけ無音を出力してリサンプラーの位相を保つ
     uint32_t skip_samples = 0;
@@ -295,7 +344,8 @@ struct ChipSlot {
 
 
     // 全チップ共通の書き込み処理
-    // OPL2/OPL3/PSG: WriteReg が即時完結
+    // OPL2/OPL3: WriteReg が即時完結
+    // DCSG: YMPSG_Write は値を 1 つ保持するだけなので、次の書き込みの前にクロックを回して取り込ませる
     // OPN2/OPM/OPLL: スロット/チャンネルタイミング依存のためフルサイクルのクロックを回す
     // generate() → flush() からオーディオコールバックスレッドのみで呼ばれる（スレッド競合なし）
     void write_direct_full(uint8_t reg, uint8_t value, uint32_t port) {
@@ -368,8 +418,9 @@ struct ChipSlot {
             skip_samples += 8;
             break;
         }
-        case NukedTag::PSG:
+        case NukedTag::DCSG:
             YMPSG_Write(&state.psg, value);
+            for (int c = 0; c < NUKED_CLOCKS_PER_WRITE_DCSG; ++c) YMPSG_Clock(&state.psg);
             break;
         default:
             break;
@@ -497,18 +548,25 @@ struct ChipSlot {
             }
             break;
         }
-        case NukedTag::PSG:
-            for (uint32_t i = 0; i < n; ++i) {
-                int32_t out; YMPSG_Generate(&state.psg, &out);
-                l[i] = r[i] = std::clamp(out, -32768, 32767) * S16;
-            }
+        case NukedTag::DCSG:  // generate() が gen_dcsg_one() を AreaResampler に通す
             break;
         }
+    }
+
+    float gen_dcsg_one() {
+        constexpr float S16 = 1.0f / 32768.0f;
+        int32_t out; YMPSG_Generate(&state.psg, &out);
+        return std::clamp(out, -32768, 32767) * S16;
     }
 
     // ターゲットレートで n フレーム生成 (リサンプリング込み)
     void generate(float* l, float* r, uint32_t n) {
         flush();
+        if (tag == NukedTag::DCSG) {
+            area_resampler.process([this]{ return gen_dcsg_one(); }, l, n);
+            std::copy(l, l + n, r);
+            return;
+        }
         resampler.process([this](float* ll, float* rr, uint32_t nn){ gen_native(ll, rr, nn); },
                           l, r, n);
     }
@@ -521,16 +579,22 @@ static std::unique_ptr<ChipSlot> makeSlot(NukedTag tag, uint32_t clock, uint32_t
     auto s = std::make_unique<ChipSlot>();
     s->tag         = tag;
     s->clock_hz    = clock;
-    s->native_rate_hz = nativeRate(tag, s->clock_hz, sr);
-    s->resampler.setup(s->native_rate_hz, sr);
+    s->native_rate_hz = nativeRate(tag, s->clock_hz);
+    // OPL2/OPL3 はコアの内蔵リサンプラーが出力レートで返すので、ここでは変換しない
+    const bool core_resamples = tag == NukedTag::OPL2 || tag == NukedTag::OPL3;
+    s->resampler.setup(core_resamples ? sr : s->native_rate_hz, sr);
+    if (tag == NukedTag::DCSG)
+        s->area_resampler.setup(static_cast<double>(s->clock_hz) / NUKED_CLOCKS_PER_SAMPLE_DCSG / sr);
     for (uint32_t p = 0; p < kPartCount; ++p) {
         s->part_gain_l[p].store(defaultPartGain(p), std::memory_order_relaxed);
         s->part_gain_r[p].store(defaultPartGain(p), std::memory_order_relaxed);
     }
 
     switch (tag) {
-    case NukedTag::OPL3: OPL3_Reset(&s->state.opl3, sr); break;
-    case NukedTag::OPL2: OPL2_Reset(&s->state.opl2, sr); break;
+    case NukedTag::OPL3:
+        OPL3_Reset(&s->state.opl3, oplResetRate(sr, s->clock_hz, NUKED_CLOCKS_PER_SAMPLE_OPL3)); break;
+    case NukedTag::OPL2:
+        OPL2_Reset(&s->state.opl2, oplResetRate(sr, s->clock_hz, NUKED_CLOCKS_PER_SAMPLE_OPL2)); break;
     case NukedTag::OPN2_YM2612:
         OPN2_SetChipType(ym3438_mode_ym2612);
         OPN2_Reset(&s->state.opn2); break;
@@ -549,10 +613,12 @@ static std::unique_ptr<ChipSlot> makeSlot(NukedTag tag, uint32_t clock, uint32_t
     case NukedTag::OPLL_YM2423:
     case NukedTag::OPLL_VRC7:
         OPLL_Reset(&s->state.opll, opllTypeFrom(tag)); break;
-    case NukedTag::PSG:
+    case NukedTag::DCSG:
         YMPSG_Init(&s->state.psg);
-        YMPSG_SetIC(&s->state.psg, 1);
-        YMPSG_SetIC(&s->state.psg, 0); break;
+        // YMPSG_Init が戻った時点ではリセットがまだチップ内部に残っており、その間の書き込みは
+        // 値が化ける。リセットが抜けるまでクロックを回す (26 クロックで抜けるのを測った)。
+        for (int c = 0; c < NUKED_CLOCKS_AFTER_INIT_DCSG; ++c) YMPSG_Clock(&s->state.psg);
+        break;
     }
     return s;
 }

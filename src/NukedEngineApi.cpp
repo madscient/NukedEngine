@@ -245,15 +245,34 @@ static uint32_t opllTypeFrom(NukedTag t) {
 // -------------------------------------------------------
 //  出力の部位
 // -------------------------------------------------------
-static constexpr uint32_t kPartCount = FM_PART_OPL4_DO2 + 1;
-static_assert(kPartCount <= 32, "part mask is uint32_t");
+struct PartDef  { const char* name; float default_gain; };
+struct PartList { const PartDef* defs; uint32_t count; };
+
+// 部位の番号。チップごとに 0 から振り、ChipSlot::part_gain_l / part_gain_r の添字と、
+// 下の表の並びと、FmEngine_GetPartName の index を兼ねる。
+enum : uint32_t { kOpl3PartAB, kOpl3PartCD, kOpl3PartCount };
+enum : uint32_t { kOpllPartMelody, kOpllPartRhythm, kOpllPartCount };
+static constexpr uint32_t kMaxParts = 2;
+static_assert(kOpl3PartCount <= kMaxParts && kOpllPartCount <= kMaxParts,
+              "ChipSlot::part_gain_l / part_gain_r hold kMaxParts entries");
+
+// C/D 側は既定で混ぜない。FM の出力先を A/B/C/D 全部にしたチャンネルは A/B と C/D に
+// 同じ音を出すので、混ぜると二重に足される。
+static constexpr PartDef kOpl3Parts[kOpl3PartCount] = {
+    { "AB", 1.0f },
+    { "CD", 0.0f },
+};
+static constexpr PartDef kOpllParts[kOpllPartCount] = {
+    { "MELODY", 1.0f },
+    { "RHYTHM", 1.0f },
+};
 
 // 仕様書の表に無い OPLL-B/OPLLP-B/OPLL2 にも OPLL と同じ部位を持たせる。OPLL 系はどの型番も
 // ピンアウトが同じで、違いは内蔵音色 ROM だけ。
-static uint32_t partMask(NukedTag t) {
+static PartList partsOf(NukedTag t) {
     switch (t) {
         case NukedTag::OPL3:
-            return (1u << FM_PART_OPL3_AB) | (1u << FM_PART_OPL3_CD);
+            return { kOpl3Parts, kOpl3PartCount };
         case NukedTag::OPLL:
         case NukedTag::OPLL_B:
         case NukedTag::OPLL_YMF281:
@@ -261,26 +280,17 @@ static uint32_t partMask(NukedTag t) {
         case NukedTag::OPLL2:
         case NukedTag::OPLL_YM2423:
         case NukedTag::OPLL_VRC7:
-            return (1u << FM_PART_OPLL_MELODY) | (1u << FM_PART_OPLL_RHYTHM);
+            return { kOpllParts, kOpllPartCount };
         default:
-            return 0;
+            return { nullptr, 0 };
     }
 }
 
-static bool hasPart(NukedTag t, FmPart part) {
-    const uint32_t p = static_cast<uint32_t>(part);
-    return p < kPartCount && ((partMask(t) >> p) & 1u);
-}
-
-// C/D 側は既定で混ぜない。FM の出力先を A/B/C/D 全部にしたチャンネルは A/B と C/D に
-// 同じ音を出すので、混ぜると二重に足される。
-static float defaultPartGain(uint32_t part) {
-    switch (part) {
-        case FM_PART_OPL3_CD:
-        case FM_PART_OPL4_DO0:
-        case FM_PART_OPL4_DO1: return 0.0f;
-        default:               return 1.0f;
-    }
+// name の部位の番号を返す。チップが持たない名前なら parts.count を返す。
+static uint32_t findPart(const PartList& parts, const char* name) {
+    uint32_t p = 0;
+    while (p < parts.count && strcmp(parts.defs[p].name, name) != 0) ++p;
+    return p;
 }
 
 // -------------------------------------------------------
@@ -293,8 +303,8 @@ struct ChipSlot {
     std::atomic<float> gain_l{1.0f};
     std::atomic<float> gain_r{1.0f};
     // FmEngine_SetGain のゲインとは別に持ち、gen_native で部位を混ぜるときに掛ける
-    std::atomic<float> part_gain_l[kPartCount]{};
-    std::atomic<float> part_gain_r[kPartCount]{};
+    std::atomic<float> part_gain_l[kMaxParts]{};
+    std::atomic<float> part_gain_r[kMaxParts]{};
     LinearResampler resampler;
     AreaResampler   area_resampler;  // DCSG 専用
     // write_direct_full でのフルサイクルクロック消費分をサンプル単位でカウント
@@ -441,10 +451,10 @@ struct ChipSlot {
         if (n == 0) return;
         switch (tag) {
         case NukedTag::OPL3: {
-            const float abl = part_gain_l[FM_PART_OPL3_AB].load(std::memory_order_relaxed);
-            const float abr = part_gain_r[FM_PART_OPL3_AB].load(std::memory_order_relaxed);
-            const float cdl = part_gain_l[FM_PART_OPL3_CD].load(std::memory_order_relaxed);
-            const float cdr = part_gain_r[FM_PART_OPL3_CD].load(std::memory_order_relaxed);
+            const float abl = part_gain_l[kOpl3PartAB].load(std::memory_order_relaxed);
+            const float abr = part_gain_r[kOpl3PartAB].load(std::memory_order_relaxed);
+            const float cdl = part_gain_l[kOpl3PartCD].load(std::memory_order_relaxed);
+            const float cdr = part_gain_r[kOpl3PartCD].load(std::memory_order_relaxed);
             for (uint32_t i = 0; i < n; ++i) {
                 int16_t buf[4]; OPL3_Generate4ChResampled(&state.opl3, buf);
                 l[i] = (buf[0] * abl + buf[2] * cdl) * S16;
@@ -524,10 +534,10 @@ struct ChipSlot {
             // 最大9ch+リズムの合算となるため過大にならないよう正規化する。
             constexpr int OPLL_CLOCKS_PER_SAMPLE_ACTUAL = 18;
             constexpr float OPLL_SCALE = S16 * 128.0f / 9.0f;
-            const float ml = part_gain_l[FM_PART_OPLL_MELODY].load(std::memory_order_relaxed);
-            const float mr = part_gain_r[FM_PART_OPLL_MELODY].load(std::memory_order_relaxed);
-            const float rl = part_gain_l[FM_PART_OPLL_RHYTHM].load(std::memory_order_relaxed);
-            const float rr = part_gain_r[FM_PART_OPLL_RHYTHM].load(std::memory_order_relaxed);
+            const float ml = part_gain_l[kOpllPartMelody].load(std::memory_order_relaxed);
+            const float mr = part_gain_r[kOpllPartMelody].load(std::memory_order_relaxed);
+            const float rl = part_gain_l[kOpllPartRhythm].load(std::memory_order_relaxed);
+            const float rr = part_gain_r[kOpllPartRhythm].load(std::memory_order_relaxed);
             for (uint32_t i = 0; i < n; ++i) {
                 int32_t melody = 0, rhythm = 0;
                 for (int c = 0; c < OPLL_CLOCKS_PER_SAMPLE_ACTUAL; ++c) {
@@ -585,9 +595,10 @@ static std::unique_ptr<ChipSlot> makeSlot(NukedTag tag, uint32_t clock, uint32_t
     s->resampler.setup(core_resamples ? sr : s->native_rate_hz, sr);
     if (tag == NukedTag::DCSG)
         s->area_resampler.setup(static_cast<double>(s->clock_hz) / NUKED_CLOCKS_PER_SAMPLE_DCSG / sr);
-    for (uint32_t p = 0; p < kPartCount; ++p) {
-        s->part_gain_l[p].store(defaultPartGain(p), std::memory_order_relaxed);
-        s->part_gain_r[p].store(defaultPartGain(p), std::memory_order_relaxed);
+    const PartList parts = partsOf(tag);
+    for (uint32_t p = 0; p < parts.count; ++p) {
+        s->part_gain_l[p].store(parts.defs[p].default_gain, std::memory_order_relaxed);
+        s->part_gain_r[p].store(parts.defs[p].default_gain, std::memory_order_relaxed);
     }
 
     switch (tag) {
@@ -759,59 +770,50 @@ FmEngine_GetGain(FmEngineHandle h, uint32_t chip_id, float* out_l, float* out_r)
     return FM_OK;
 }
 
+FMENGINE_API uint32_t FMENGINE_CALL
+FmEngine_GetPartCount(FmEngineHandle h, uint32_t chip_id) {
+    if (!h) return 0;
+    auto* eng = static_cast<FmEngineOpaque*>(h);
+    if (chip_id >= eng->chips.size()) return 0;
+    return partsOf(eng->chips[chip_id]->tag).count;
+}
+
+FMENGINE_API const char* FMENGINE_CALL
+FmEngine_GetPartName(FmEngineHandle h, uint32_t chip_id, uint32_t index) {
+    if (!h) return nullptr;
+    auto* eng = static_cast<FmEngineOpaque*>(h);
+    if (chip_id >= eng->chips.size()) return nullptr;
+    const PartList parts = partsOf(eng->chips[chip_id]->tag);
+    if (index >= parts.count) return nullptr;
+    return parts.defs[index].name;
+}
+
 FMENGINE_API FmResult FMENGINE_CALL
-FmEngine_SetPartGain(FmEngineHandle h, uint32_t chip_id, FmPart part, float gain_l, float gain_r) {
-    REQUIRE_PTR(h);
+FmEngine_SetPartGain(FmEngineHandle h, uint32_t chip_id, const char* part, float gain_l, float gain_r) {
+    REQUIRE_PTR(h); REQUIRE_PTR(part);
     auto* eng = static_cast<FmEngineOpaque*>(h);
     if (chip_id >= eng->chips.size()) return FM_ERR_INVALID_ARG;
     ChipSlot& s = *eng->chips[chip_id];
-    if (!hasPart(s.tag, part)) return FM_ERR_INVALID_ARG;
-    s.part_gain_l[part].store(gain_l, std::memory_order_relaxed);
-    s.part_gain_r[part].store(gain_r, std::memory_order_relaxed);
+    const PartList parts = partsOf(s.tag);
+    const uint32_t p = findPart(parts, part);
+    if (p >= parts.count) return FM_ERR_INVALID_ARG;
+    s.part_gain_l[p].store(gain_l, std::memory_order_relaxed);
+    s.part_gain_r[p].store(gain_r, std::memory_order_relaxed);
     return FM_OK;
 }
 
 FMENGINE_API FmResult FMENGINE_CALL
-FmEngine_GetPartGain(FmEngineHandle h, uint32_t chip_id, FmPart part, float* out_l, float* out_r) {
-    REQUIRE_PTR(h); REQUIRE_PTR(out_l); REQUIRE_PTR(out_r);
+FmEngine_GetPartGain(FmEngineHandle h, uint32_t chip_id, const char* part, float* out_l, float* out_r) {
+    REQUIRE_PTR(h); REQUIRE_PTR(part); REQUIRE_PTR(out_l); REQUIRE_PTR(out_r);
     auto* eng = static_cast<FmEngineOpaque*>(h);
     if (chip_id >= eng->chips.size()) return FM_ERR_INVALID_ARG;
     const ChipSlot& s = *eng->chips[chip_id];
-    if (!hasPart(s.tag, part)) return FM_ERR_INVALID_ARG;
-    *out_l = s.part_gain_l[part].load(std::memory_order_relaxed);
-    *out_r = s.part_gain_r[part].load(std::memory_order_relaxed);
+    const PartList parts = partsOf(s.tag);
+    const uint32_t p = findPart(parts, part);
+    if (p >= parts.count) return FM_ERR_INVALID_ARG;
+    *out_l = s.part_gain_l[p].load(std::memory_order_relaxed);
+    *out_r = s.part_gain_r[p].load(std::memory_order_relaxed);
     return FM_OK;
-}
-
-FMENGINE_API FmResult FMENGINE_CALL
-FmEngine_GetPartMask(FmEngineHandle h, uint32_t chip_id, uint32_t* out_mask) {
-    REQUIRE_PTR(h); REQUIRE_PTR(out_mask);
-    auto* eng = static_cast<FmEngineOpaque*>(h);
-    if (chip_id >= eng->chips.size()) return FM_ERR_INVALID_ARG;
-    *out_mask = partMask(eng->chips[chip_id]->tag);
-    return FM_OK;
-}
-
-FMENGINE_API FmResult FMENGINE_CALL
-FmEngine_SetMemory(FmEngineHandle /*h*/, uint32_t /*chip_id*/,
-                   FmMemoryType /*mem_type*/, const uint8_t* /*data*/, uint32_t /*size*/) {
-    // Nuked コアは外部メモリ未サポート
-    fprintf(stderr, "[NukedEngine] FmEngine_SetMemory: not supported\n");
-    return FM_ERR_UNAVAILABLE;
-}
-
-FMENGINE_API uint32_t FMENGINE_CALL
-FmEngine_GetMemorySize(FmEngineHandle /*h*/, uint32_t /*chip_id*/, FmMemoryType /*mem_type*/) {
-    return 0;
-}
-
-FMENGINE_API FmResult FMENGINE_CALL
-FmEngine_SetMemoryEx(FmEngineHandle /*h*/, uint32_t /*chip_id*/, FmMemoryType /*mem_type*/,
-                     uint32_t /*base*/, uint8_t* /*data*/, uint32_t /*size*/,
-                     FmMemoryAccess /*access*/) {
-    // SetMemory と違い FM_ERR_UNAVAILABLE ではない。仕様は「チップが持たない mem_type」を
-    // FM_ERR_INVALID_ARG とし、UNAVAILABLE は RAM をその場で読み書きできない場合に限る。
-    return FM_ERR_INVALID_ARG;
 }
 
 FMENGINE_API FmResult FMENGINE_CALL

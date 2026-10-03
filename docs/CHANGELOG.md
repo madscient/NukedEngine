@@ -2,6 +2,143 @@
 
 開発経緯の記録。現在の仕様は `README.md` を参照。
 
+## FmEngineApi の改訂に追従する（部位と外部メモリを名前で指定する）
+
+従った仕様：FMEngineTest `20c4923` の `docs/FmEngineApi.md` と `include/FmEngineApi.h`
+（ヘッダの正本が YMEngine からここに移った）。同じコミットの `docs/CHANGELOG.md` が
+エンジンごとの対応を挙げており、NukedEngine に当たるのは次の 4 つ。
+
+- 名前を変えた派生ヘッダは、正本と同じ宣言に直す
+- `FmEngine_GetPartMask` をやめ、`FmEngine_GetPartCount` / `FmEngine_GetPartName` を足す
+- `FmEngine_SetPartGain` / `FmEngine_GetPartGain` は部位の名前を受け取る
+- スタブの 5 本（NukedEngine を含む）は、外部メモリの関数のエクスポートをやめる
+
+YMEngine（`7d8ed2d`）はまだ番号で指定する形で、今回は参照していない。
+
+### 変えたこと
+
+- `FmPart` と `FmEngine_GetPartMask` を無くし、`FmEngine_GetPartCount` /
+  `FmEngine_GetPartName` を足した。`FmEngine_SetPartGain` / `FmEngine_GetPartGain` の
+  第 3 引数は部位の名前
+- `FmMemoryType`、`FmMemoryAccess`、`FmEngine_SetMemory`、`FmEngine_GetMemorySize`、
+  `FmEngine_SetMemoryEx` を無くした。仕様に足された `FmEngine_GetMemoryCount` /
+  `FmEngine_GetMemoryName` は持たない
+- エクスポートは 18 から 16（必須 12 + 部位ごとのゲイン 4）になった
+- `src/NukedEngineApi.h` の include を `<cstdint>` から `<stdint.h>` にした（正本と同じ。
+  C から使える）
+
+### 決めたこと
+
+利用者からは「追従する」とだけ指示を受けた。以下はこちらで決め、利用者と個別には
+決めていない。
+
+- 外部メモリの関数は、0 や NULL を返すスタブも置かない。FMEngineTest の CHANGELOG の
+  とおり。「FmEngineApi の改訂に追従する（部位ゲイン、FmEngine_SetMemoryEx）」の項の
+  「`.def` は仕様の必須・任意シンボルをすべて載せる」は、これで置き換わる
+- `src/NukedEngineApi.h` には、外部メモリの関数と `FmMemoryAccess` を宣言しない。
+  ライブラリに無い関数を宣言しないため。「正本と同じ宣言」は、宣言する 16 関数と
+  `FmResult` について満たす
+- 部位の名前：仕様書の表にある OPLL / OPLLP / OPLLX / VRC7 は表のとおり `MELODY` /
+  `RHYTHM`、OPL3 は `AB` / `CD`。表に無い OPLL-B / OPLLP-B / OPLL2 も `MELODY` /
+  `RHYTHM` にした。仕様は、表に無いチップの名前をエンジンが決めるとしている。
+  この 3 型番に部位を持たせた理由は、上に挙げた項と同じ
+- 部位の並び（`index`）：OPLL 系は `MELODY`、`RHYTHM` の順、OPL3 は `AB`、`CD` の順。
+  仕様は順序を定めていない
+- 部位ゲインの持ち方：部位の番号をチップごとに 0 から振り、チップあたり最大 2 個
+  （`kMaxParts`）。部位を持つコアを足すときは、名前と既定値の表を 1 つ足す
+- README の冒頭と互換性の節は、YMEngine の API と同じだとは書かず、仕様への準拠
+  として書いた。YMEngine が今の仕様に追従するまでは、部位ゲインの引数が違う
+
+前提：
+
+- 番号で指定する形でビルドした呼び出し側を、この DLL と組み合わせないこと。
+  組み合わせて `FmEngine_SetPartGain` を呼ぶと、DLL は番号をポインタとして読む。
+  FMEngineTest の CHANGELOG は、部位ゲインを呼ぶアプリケーションは無いとしている
+  （2026-10-03 に、そこに挙げたリポジトリを検索した結果。こちらでは確かめていない）
+- NukedEngine のチップが外部メモリを持たないこと。OPNA / Y8950 / OPL4 などのコアを
+  足すときは、外部メモリの 3 関数（要れば `FmEngine_SetMemoryEx` も）を足す
+
+やり直しの値段：
+
+- 外部メモリのスタブを置く（`FmEngine_GetMemoryCount` が 0、`FmEngine_GetMemoryName` が
+  NULL、`FmEngine_SetMemory` が `FM_ERR_INVALID_ARG`）：実装 3 関数、ヘッダ、`.def`、
+  README の互換性の表と「外部メモリ」の節
+- OPLL-B / OPLLP-B / OPLL2 の部位の名前を変える：`NukedEngineApi.cpp` の表 1 つと
+  README の表。アプリケーションが名前を設定ファイルに書き始めた後は、そちらにも及ぶ
+
+未決：FMEngineTest の仕様書の表に OPLL-B / OPLLP-B / OPLL2 を足すか。仕様は、同じ
+チップを複数のエンジンが実装するときに表へ足して名前を揃えるとしている。
+
+### 見送った案
+
+- 外部メモリの 3 関数を、0 / NULL / `FM_ERR_INVALID_ARG` を返すスタブとして
+  エクスポートする。理由：FMEngineTest の CHANGELOG が、スタブのエンジンには
+  エクスポートをやめるよう求めている。見送った結果、静的リンクで `FmEngine_SetMemory`
+  などを直接呼ぶコードはビルドできなくなる（これまでは `FM_ERR_UNAVAILABLE` が
+  返っていた）
+- ヘッダには 20 関数すべてを宣言し、外部メモリの 4 つは実体を持たない。理由：呼んだ
+  ことがリンクまで分からない。宣言しなければコンパイルで分かる
+- 正本の `FmEngineApi.h` を写しのまま置き、`NukedEngineApi.h` から include する。
+  理由：正本は Windows で dllexport か dllimport のどちらかになり、静的リンク
+  （`NUKEDENGINE_STATIC`）を表せない
+
+### 確認
+
+**確認済み**（MSVC 2019 x64 Release、Ninja。変更前は `5a74341`。`FmEngine_*` を DLL から
+動的に引くハーネスで、48 kHz・1 秒の出力をファイルに書いて比べた）：
+
+- ビルドは DLL・静的ライブラリとも通る。警告は変更前と同じ 3 種（`ympsg.c` の C4305、
+  `opl2.c` の C4244、`NukedEngineApi.cpp` の C4005）
+- DLL のエクスポートは 16（`dumpbin /exports`）。変更前は 18。`FmEngine_GetPartMask`、
+  `FmEngine_GetMemorySize`、`FmEngine_SetMemory`、`FmEngine_SetMemoryEx`、
+  `FmEngine_GetMemoryCount`、`FmEngine_GetMemoryName` は `GetProcAddress` で引けない
+- `src/NukedEngineApi.h` が宣言する 16 関数は、コメントと空白を除いて正本の宣言と
+  一致し、`FmResult` も一致する（スクリプトで突き合わせた）。正本だけにあるのは
+  外部メモリの 4 関数。変更前のヘッダで同じ突き合わせをすると、4 関数の不一致と
+  正本に無い 2 関数で落ちる（対照）
+- ヘッダは C（`/TC`）と C++（`/TP`）の両方で `/W4 /WX` で通る。16 関数を呼ぶ
+  プログラムが、静的ライブラリとインポートライブラリのどちらでもリンクでき、動く。
+  README の部位ゲインのコード例もビルドして動かした
+- `FmPart`、`FmMemoryType`、`FmEngine_GetPartMask`、`FmEngine_SetMemory` を使うコードは
+  ビルドできない。C++ ではどれもコンパイルエラー。C では、型はコンパイルエラー、
+  関数は未宣言の警告（C4013）のあと、静的ライブラリとのリンクで未解決になる。
+  同じプログラムからその行を外すとビルドできる（対照）
+- 部位の列挙：14 チップすべてで上の決定どおり（OPL3 が `AB` `CD`、OPLL 系 7 型番が
+  `MELODY` `RHYTHM`、ほかは 0 個）。既定値は `CD` だけ 0
+- 拒否と独立性（計 1145 項目）：チップが持たない部位の名前（仕様書の表の 9 個を
+  14 チップすべてに渡した）、大文字小文字の違い、前後の空白、前方一致、空文字列、
+  NULL、未知の chip_id、NULL のハンドル、NULL の出力ポインタで `FM_ERR_INVALID_ARG`。
+  拒否された `FmEngine_SetPartGain` はゲインを変えない。チップが持たない名前で拒否
+  された `FmEngine_GetPartGain` は、出力先の変数を書き換えない。`FmEngine_GetPartName` は範囲外の
+  `index` と未知の chip_id で NULL、`FmEngine_GetPartCount` は未知の chip_id で 0。
+  ある部位やあるチップのゲインを変えても、ほかの部位やチップのゲインは変わらない。
+  名前は、呼び出し側が別のバッファに写したものを渡しても通る
+- 出力：32 シナリオが、変更前の DLL に番号で同じゲインを指定した出力とバイト単位で
+  一致する。内訳は、部位を持たない 6 チップ、OPL3 の 8 通り（互換モード、A/B のみ、
+  C/D のみ、A/B/C/D、`CD` を 1 にした 2 通り、3 チャンネルを別々の出力先に振って
+  部位ゲインを既定値と非対称にした 2 通り）、OPLL の 4 通り（メロディのみ、リズムのみ、
+  片方の部位を 0 にした 2 通り）、OPLL 系 7 型番のメロディ + リズムを既定値と非対称の
+  ゲインで 2 通りずつ。無音なのは、`CD` が既定値のままの「C/D のみ」1 つだけ
+- 上の比較は、名前と出力の取り違えで落ちる：非対称のゲインを 2 つの部位の間で
+  入れ替えて鳴らすと、部位ゲインを 2 つ指定した 8 シナリオがすべて不一致になり、
+  残りの 24 は一致する（対照）
+- FMEngineTest（`20c4923` のソースをビルド）：DLL をロードでき、
+  `FmEngine_GetMemoryCount is not exported: ROM files will not be loaded.` を出す
+  （変更前の DLL でも同じ行が出る）。`opl2` `opl3` `opll` `opllp` `opllx` `vrc7` `opm`
+  `opn2` `dcsg` `all` の WAV は変更前の DLL とバイト単位で一致し、どれも無音ではない。
+  `opna` は変更前も変更後も `[SKIP] OPNA : unknown chip type` で、WAV は空
+
+**未検証**：
+
+- 名前で指定する部位ゲインを、ハーネス以外の呼び出し側から使うこと。FMEngineTest は
+  部位ゲインを呼ばないので、上の WAV の一致は部位ゲインの確認になっていない
+- GCC / Clang でのビルド（手元に無い）
+- オーディオコールバックと並行した `FmEngine_SetPartGain`。ゲインを
+  `std::atomic<float>` で持つ作りは変えていないが、並行に動かして確かめてはいない
+
+README から「`patches/opna.json` 等 ADPCM を使うパッチは ADPCM 部分が無音になります」を
+消した。NukedEngine は OPNA を持たず、チップごとスキップされる（上の確認）。
+
 ## OPL2 / OPL3 / DCSG で clock を反映する。DCSG を直し、チップ名を PSG から DCSG に変える
 
 前の項の「未解決」をすべて直した。

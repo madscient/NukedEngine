@@ -1,10 +1,17 @@
 #pragma once
 // NukedEngineApi.h
-// FmEngineApi.h (madscient/YMEngine) と互換の C ファサード API。
-// バックエンドを ymfm から Nuked シリーズエミュレーターに差し替えた実装。
+// FmEngineApi の C インターフェースを Nuked シリーズエミュレーターで実装したエンジンの公開ヘッダ。
 //
-// チップはキーワード文字列で指定する ("OPM", "OPLL" 等)。
-// 対応チップの一覧は FmEngine_Inquiry / FmEngine_GetSupportedChip で取得できる。
+// 宣言は FmEngineApi.h と同じ (正本は https://github.com/madscient/FMEngineTest の
+// include/FmEngineApi.h、仕様は同じリポジトリの docs/FmEngineApi.md)。違いは次の 2 点。
+//   - エクスポート属性を下のビルド定義で切り替える
+//   - 外部メモリの関数 (FmEngine_GetMemoryCount / FmEngine_GetMemoryName /
+//     FmEngine_SetMemory / FmEngine_SetMemoryEx) を持たない。NukedEngine のチップは
+//     どれも外部メモリを持たない
+//
+// チップと部位はキーワード文字列で指定する ("OPM"、"MELODY" 等)。
+// 一覧は FmEngine_Inquiry / FmEngine_GetSupportedChip と、FmEngine_GetPartCount /
+// FmEngine_GetPartName で取得できる。
 //
 // ビルド定義:
 //   NUKEDENGINE_EXPORTS → dllexport (DLL 本体ビルド時)
@@ -14,7 +21,7 @@
 #ifndef NUKEDENGINE_API_H
 #define NUKEDENGINE_API_H
 
-#include <cstdint>
+#include <stdint.h>
 
 // =========================================================
 //  エクスポート属性マクロ (FmEngineApi.h の FMENGINE_API/FMENGINE_CALL と同形)
@@ -43,46 +50,10 @@
 typedef enum FmResult {
     FM_OK                =  0,
     FM_ERR_INVALID_ARG   = -1,
-    FM_ERR_UNKNOWN_CHIP  = -2,  // 未知のチップ名
+    FM_ERR_UNKNOWN_CHIP  = -2,  // FmEngine_AddChip で未知のチップ名
     FM_ERR_ALLOC         = -3,
     FM_ERR_UNAVAILABLE   = -4,
 } FmResult;
-
-// =========================================================
-//  メモリ種別 (FmEngineApi.h と完全一致)
-//  チップから見えるメモリ。NukedEngine のチップはどれも外部メモリを持たない。
-// =========================================================
-typedef enum FmMemoryType {
-    FM_MEM_ADPCM_A         = 1,  // ADPCM-A (OPNA/OPNB/OPNBB)
-    FM_MEM_ADPCM_B         = 2,  // ADPCM-B (OPNA/OPNB/OPNBB/Y8950)。OPNA/Y8950 では RAM モードのメモリ
-    FM_MEM_PCM             = 3,  // PCM (OPL4)
-    FM_MEM_ADPCM_B_ROMMODE = 4,  // ADPCM-B の ROM モードのメモリ (OPNA/Y8950)。FmEngine_SetMemoryEx 専用
-} FmMemoryType;
-
-// =========================================================
-//  外部メモリにつないだデバイスの種類 (FmEngineApi.h と完全一致)
-// =========================================================
-typedef enum FmMemoryAccess {
-    FM_ACCESS_ROM = 0,  // 割り当て中は内容が変わらない。チップからの書き込みは捨てる
-    FM_ACCESS_RAM = 1,  // チップ以外も書き換えてよい。ブロックをその場で読み書きする
-} FmMemoryAccess;
-
-// =========================================================
-//  出力の部位 (FmEngineApi.h と完全一致)
-//  チップが別々の端子から出す出力。番号はチップをまたいで重ならない。
-//  NukedEngine で部位を持つのは OPLL 系 (MELODY/RHYTHM) と OPL3 (AB/CD) だけ。
-// =========================================================
-typedef enum FmPart {
-    FM_PART_OPN_FM      = 0,  // OPN/OPNA/OPNB/OPNBB: FM 部 (ADPCM・リズムを含む)
-    FM_PART_OPN_SSG     = 1,  //   SSG 部
-    FM_PART_OPLL_MELODY = 2,  // OPLL 系: メロディ
-    FM_PART_OPLL_RHYTHM = 3,  //   リズム
-    FM_PART_OPL3_AB     = 4,  // OPL3: 出力 A (L) / B (R)
-    FM_PART_OPL3_CD     = 5,  //   出力 C (L) / D (R)。既定のゲインは 0
-    FM_PART_OPL4_DO0    = 6,  // OPL4: DO0 (FM の C/D)。既定のゲインは 0
-    FM_PART_OPL4_DO1    = 7,  //   DO1 (AWM の C/D)。既定のゲインは 0
-    FM_PART_OPL4_DO2    = 8,  //   DO2 (FM の A/B と AWM の A/B のミックス)
-} FmPart;
 
 // =========================================================
 //  不透明ハンドル
@@ -104,7 +75,7 @@ FMENGINE_API void           FMENGINE_CALL FmEngine_Destroy(FmEngineHandle engine
 // =========================================================
 //  対応チップ問い合わせ
 //  FmEngine_Inquiry        : 対応チップの総数を返す。
-//  FmEngine_GetSupportedChip: index 番目のチップ名を返す (範囲外は nullptr)。
+//  FmEngine_GetSupportedChip: index 番目のチップ名を返す (範囲外は NULL)。
 // =========================================================
 FMENGINE_API uint32_t    FMENGINE_CALL FmEngine_Inquiry(FmEngineHandle engine);
 FMENGINE_API const char* FMENGINE_CALL FmEngine_GetSupportedChip(
@@ -124,7 +95,7 @@ FMENGINE_API FmResult FMENGINE_CALL FmEngine_AddChip(
 // =========================================================
 FMENGINE_API const char* FMENGINE_CALL FmEngine_GetChipName(
     FmEngineHandle engine, uint32_t chip_id);
-// FM 部のネイティブサンプルレート (Hz、端数切り捨て)。
+// ネイティブサンプルレート (Hz、端数切り捨て)。
 FMENGINE_API uint32_t    FMENGINE_CALL FmEngine_GetNativeRate(
     FmEngineHandle engine, uint32_t chip_id);
 FMENGINE_API uint32_t    FMENGINE_CALL FmEngine_GetSampleRate(
@@ -149,40 +120,28 @@ FMENGINE_API FmResult FMENGINE_CALL FmEngine_GetGain(
     float* out_gain_l, float* out_gain_r);
 
 // =========================================================
-//  部位ごとのゲイン設定 (L/R 独立)
-//  実際に掛かるゲインは FmEngine_SetGain のゲイン × 部位のゲイン。
-//  既定値は 1.0 (FM_PART_OPL3_CD は 0)。
-//  チップが持たない部位や未知の chip_id を指定すると FM_ERR_INVALID_ARG。
-//  オーディオコールバックスレッドと並行して呼び出し可能。
+//  部位ごとのゲイン (L/R 独立)
+//  部位は、チップが別々の端子から出す出力。名前の文字列で指定する
+//  (大文字小文字を区別する)。
+//  NukedEngine で部位を持つのは OPLL 系 ("MELODY" / "RHYTHM") と OPL3 ("AB" / "CD") だけ。
+//  既定値は 1.0 ("CD" は 0)。
 // =========================================================
+// チップが持つ部位の数。部位を持たないチップと未知の chip_id は 0。
+FMENGINE_API uint32_t    FMENGINE_CALL FmEngine_GetPartCount(
+    FmEngineHandle engine, uint32_t chip_id);
+// index 番目の部位の名前 (範囲外と未知の chip_id は NULL)。
+// 文字列は FmEngine_Destroy が戻るまで有効。
+FMENGINE_API const char* FMENGINE_CALL FmEngine_GetPartName(
+    FmEngineHandle engine, uint32_t chip_id, uint32_t index);
+// 実際に掛かるゲインは FmEngine_SetGain のゲイン × 部位のゲイン。
+// 未知の chip_id、チップが持たない部位の名前、NULL は FM_ERR_INVALID_ARG。
+// オーディオコールバックスレッドと並行して呼び出し可能。
 FMENGINE_API FmResult FMENGINE_CALL FmEngine_SetPartGain(
-    FmEngineHandle engine, uint32_t chip_id, FmPart part,
+    FmEngineHandle engine, uint32_t chip_id, const char* part,
     float gain_l, float gain_r);
 FMENGINE_API FmResult FMENGINE_CALL FmEngine_GetPartGain(
-    FmEngineHandle engine, uint32_t chip_id, FmPart part,
+    FmEngineHandle engine, uint32_t chip_id, const char* part,
     float* out_gain_l, float* out_gain_r);
-// チップが持つ部位をビットマスクで返す (bit n = FmPart の n 番)。
-// 部位を持たないチップは 0。未知の chip_id なら FM_ERR_INVALID_ARG。
-FMENGINE_API FmResult FMENGINE_CALL FmEngine_GetPartMask(
-    FmEngineHandle engine, uint32_t chip_id, uint32_t* out_mask);
-
-// =========================================================
-//  外部メモリ設定 (NukedEngine では未サポート → FM_ERR_UNAVAILABLE)
-// =========================================================
-FMENGINE_API FmResult  FMENGINE_CALL FmEngine_SetMemory(
-    FmEngineHandle engine, uint32_t chip_id,
-    FmMemoryType mem_type, const uint8_t* data, uint32_t size);
-FMENGINE_API uint32_t  FMENGINE_CALL FmEngine_GetMemorySize(
-    FmEngineHandle engine, uint32_t chip_id, FmMemoryType mem_type);
-
-// =========================================================
-//  外部メモリの割り当て (ROM/RAM を区別する)
-//  NukedEngine のチップはどれも外部メモリを持たないため、常に FM_ERR_INVALID_ARG。
-// =========================================================
-FMENGINE_API FmResult FMENGINE_CALL FmEngine_SetMemoryEx(
-    FmEngineHandle engine, uint32_t chip_id,
-    FmMemoryType mem_type, uint32_t base,
-    uint8_t* data, uint32_t size, FmMemoryAccess access);
 
 // =========================================================
 //  波形生成

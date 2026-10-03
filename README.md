@@ -1,19 +1,19 @@
 # NukedEngine
 
-[YMEngine](https://github.com/madscient/YMEngine) (`FmEngineApi.h`) および  
-[FMEngineTest](https://github.com/madscient/FMEngineTest) と互換の C ファサード API を持つ  
+[FmEngineApi 仕様](https://github.com/madscient/FMEngineTest/blob/main/docs/FmEngineApi.md)に準拠した C API を持つ  
 FM サウンドチップエミュレーションエンジン DLL です。  
-バックエンドを ymfm から **Nuked シリーズエミュレーター**に差し替えています。  
+[YMEngine](https://github.com/madscient/YMEngine) のバックエンドを ymfm から **Nuked シリーズエミュレーター**に差し替えたものにあたります。  
 DLL は波形生成・リサンプリングまでを担い、オーディオ出力はアプリケーション側が担当します。
 
 **License: [GNU General Public License v2.0](LICENSE)**  
 Nuked-OPLL および Nuked-PSG が GPL-2.0 であるため、本プロジェクト全体も GPL-2.0 で配布します。
 
-## YMEngine / FMEngineTest との互換性
+## FmEngineApi 仕様との互換性
 
 `NukedEngineApi.dll` は [FmEngineApi 仕様](https://github.com/madscient/FMEngineTest/blob/main/docs/FmEngineApi.md)の  
-必須シンボルと任意シンボルをすべてエクスポートします。  
-FMEngineTest の `-e` オプションで差し替えるだけで、パッチ JSON を変更せずに  
+必須シンボルと、部位ごとのゲインの任意シンボルをエクスポートします。  
+外部メモリの任意シンボルはエクスポートしません ([外部メモリ](#外部メモリ)を参照)。  
+[FMEngineTest](https://github.com/madscient/FMEngineTest) の `-e` オプションで差し替えるだけで、パッチ JSON を変更せずに  
 Nuked コアで再生できます。
 
 ```
@@ -22,29 +22,25 @@ FMEngineTest.exe -e NukedEngineApi.dll patches/opm.json
 
 静的リンク時は `NukedEngineApi.h` の include を `FmEngineApi.h` の代わりに使用してください。
 
-| 項目 | FmEngineApi (仕様・YMEngine) | NukedEngineApi |
+| 項目 | FmEngineApi (仕様) | NukedEngineApi |
 |---|---|---|
 | ヘッダー | `FmEngineApi.h` | `NukedEngineApi.h` |
-| 関数名・シグネチャ | `FmEngine_*` 必須 14 + 任意 4 関数 | **完全一致** |
+| 必須の関数 (12) | `FmEngine_Create` ～ `FmEngine_Generate` | **完全一致** |
+| 部位ごとのゲインの関数 (任意、4) | `FmEngine_GetPartCount` / `FmEngine_GetPartName` / `FmEngine_SetPartGain` / `FmEngine_GetPartGain` | **完全一致** |
+| 外部メモリの関数 (任意、4) | `FmEngine_GetMemoryCount` / `FmEngine_GetMemoryName` / `FmEngine_SetMemory` / `FmEngine_SetMemoryEx` | 持たない |
 | ハンドル型 | `FmEngineHandle` | **完全一致** |
 | エラーコード | `FM_OK` / `FM_ERR_*` | **完全一致** |
-| チップ指定方法 | 文字列 (`"OPM"`, `"OPLL"` 等) | **完全一致** |
-| `FmMemoryType` / `FmMemoryAccess` 値 | `FM_MEM_*` / `FM_ACCESS_*` | **完全一致** (未サポート) |
-| `FmPart` 値 | `FM_PART_*` | **完全一致** |
-| エクスポートシンボル数 | 18 (必須 14 + 任意 4) | **18 (完全一致)** |
+| チップ・部位の指定方法 | 文字列 (`"OPM"`, `"MELODY"` 等) | **完全一致** |
+| エクスポートシンボル数 | 必須 12 + 任意 8 | 16 (必須 12 + 部位ごとのゲイン 4) |
 
-### 未サポート機能
+### 外部メモリ
 
-以下は FmEngineApi 仕様にあり NukedEngine では対応していません。  
-NukedEngine のチップはどれも外部メモリを持たないためです。
+NukedEngine のチップはどれも外部メモリ (ADPCM の ROM や RAM など) を持ちません。  
+そのため、仕様の外部メモリの関数 (`FmEngine_GetMemoryCount` / `FmEngine_GetMemoryName` /  
+`FmEngine_SetMemory` / `FmEngine_SetMemoryEx`) はエクスポートせず、`NukedEngineApi.h` にも宣言していません。
 
-| 機能 | 戻り値 |
-|---|---|
-| `FmEngine_SetMemory` / `FmEngine_GetMemorySize` (ADPCM/PCM ROM/RAM) | `FM_ERR_UNAVAILABLE` / `0` |
-| `FmEngine_SetMemoryEx` (ROM/RAM を区別した割り当て) | `FM_ERR_INVALID_ARG` |
-
-FMEngineTest の `patches/opna.json` 等 ADPCM を使うパッチは ADPCM 部分が無音になります。  
-それ以外のパッチはそのまま動作します。
+仕様では、`FmEngine_GetMemoryCount` をエクスポートしない DLL は、どのチップも外部メモリを持たないエンジンとして扱われます。  
+静的リンクで `NukedEngineApi.h` を使う場合、外部メモリの関数を呼ぶコードはビルドできません。
 
 ## 対応チップ
 
@@ -74,24 +70,41 @@ FMEngineTest の `patches/opna.json` 等 ADPCM を使うパッチは ADPCM 部�
 
 ## 部位ごとのゲイン
 
-`FmEngine_SetPartGain` / `FmEngine_GetPartGain` で、チップが別々の端子から出す出力 (部位) ごとに  
-L/R のゲインを設定できます。実際に掛かるゲインは `FmEngine_SetGain` のゲイン × 部位のゲインです。  
-チップが持つ部位は `FmEngine_GetPartMask` で取得できます (bit n = `FmPart` の n 番)。
+チップが別々の端子から出す出力 (部位) ごとに、L/R のゲインを設定できます。  
+部位は名前の文字列で指定します (大文字小文字を区別します)。  
+`FmEngine_SetPartGain` / `FmEngine_GetPartGain` に部位の名前を渡して設定・取得します。  
+実際に掛かるゲインは `FmEngine_SetGain` のゲイン × 部位のゲインです。  
+チップが持つ部位は `FmEngine_GetPartCount` / `FmEngine_GetPartName` で列挙できます。
 
-| 部位 | 対象チップ | 内容 | 既定値 |
+| 部位の名前 | 対象チップ | 内容 | 既定値 |
 |---|---|---|---|
-| `FM_PART_OPLL_MELODY` | OPLL, OPLL-B, OPLLP, OPLLP-B, OPLL2, OPLLX, VRC7 | メロディ (MO 端子) | 1.0 |
-| `FM_PART_OPLL_RHYTHM` | OPLL, OPLL-B, OPLLP, OPLLP-B, OPLL2, OPLLX, VRC7 | リズム (RO 端子) | 1.0 |
-| `FM_PART_OPL3_AB` | OPL3 | 出力 A (L) / B (R) | 1.0 |
-| `FM_PART_OPL3_CD` | OPL3 | 出力 C (L) / D (R) | 0 |
+| `MELODY` | OPLL, OPLL-B, OPLLP, OPLLP-B, OPLL2, OPLLX, VRC7 | メロディ (MO 端子) | 1.0 |
+| `RHYTHM` | OPLL, OPLL-B, OPLLP, OPLLP-B, OPLL2, OPLLX, VRC7 | リズム (RO 端子) | 1.0 |
+| `AB` | OPL3 | 出力 A (L) / B (R) | 1.0 |
+| `CD` | OPL3 | 出力 C (L) / D (R) | 0 |
 
-- OPL2 / OPN2 / OPN2C / OPM / OPP / DCSG は部位を持ちません。ゲインは `FmEngine_SetGain` で設定します。
-- チップが持たない部位を指定すると `FM_ERR_INVALID_ARG` を返します。
-- `FM_PART_OPL3_CD` の既定値が 0 なのは、FM の出力先を A/B/C/D 全部にしたチャンネルが A/B と C/D に  
+```c
+// OPLL のリズムを -6 dB にする
+FmEngine_SetPartGain(eng, opll_id, "RHYTHM", 0.5f, 0.5f);
+
+// チップが持つ部位と、そのゲインをすべて表示する
+uint32_t parts = FmEngine_GetPartCount(eng, opll_id);
+for (uint32_t i = 0; i < parts; ++i) {
+    const char* name = FmEngine_GetPartName(eng, opll_id, i);
+    float l, r;
+    FmEngine_GetPartGain(eng, opll_id, name, &l, &r);
+    printf("%s: L=%.2f R=%.2f\n", name, l, r);
+}
+```
+
+- OPL2 / OPN2 / OPN2C / OPM / OPP / DCSG は部位を持ちません (`FmEngine_GetPartCount` は 0 を返します)。ゲインは `FmEngine_SetGain` で設定します。
+- チップが持たない部位の名前を指定すると `FM_ERR_INVALID_ARG` を返します。
+- 設定ファイルなどに部位を書き残すときは、列挙の順番ではなく名前を使ってください。
+- `CD` の既定値が 0 なのは、FM の出力先を A/B/C/D 全部にしたチャンネルが A/B と C/D に  
   同じ音を出し、混ぜると二重に足されるためです。
 - OPLL 系の端子は、音を出していないときも最下位ビット数個分の無音レベルを出します。  
   片方の部位を 0 にしても、もう片方の端子の無音レベル (フルスケールの 1% 未満の、ほぼ直流の成分) が残ります。
-- VRC7 はリズム部を持たないため、`FM_PART_OPLL_RHYTHM` には無音レベルの直流成分だけが出ます。
+- VRC7 はリズム部を持たないため、`RHYTHM` には無音レベルの直流成分だけが出ます。
 
 > **ライセンスについて**: 各 Nuked コアの著作権は [Nuke.YKT](https://github.com/nukeykt) 氏にあります。  
 > Nuked-OPLL と Nuked-PSG が GPL-2.0 であるため、それらを組み込む本プロジェクト全体を  
@@ -106,7 +119,7 @@ NukedEngine/
 ├── src/
 │   ├── NukedEngineApi.h       ← 公開ヘッダー (FmEngineApi.h 互換)
 │   ├── NukedEngineApi.cpp     ← 実装
-│   └── NukedEngineApi.def     ← MSVC エクスポート定義 (FmEngineApi 仕様の必須・任意シンボル)
+│   └── NukedEngineApi.def     ← MSVC エクスポート定義 (FmEngineApi 仕様の必須シンボルと部位ごとのゲインのシンボル)
 ├── CMakeLists.txt
 └── cores/                     ← Nuked コア (git submodule)
     ├── opl3/  (Nuked-OPL3)
@@ -168,6 +181,7 @@ FMEngineTest.exe -e NukedEngineApi.dll patches/opm.json patches/opll.json
 FMEngineTest
 Loading engine: NukedEngineApi.dll
 Engine loaded.
+  FmEngine_GetMemoryCount is not exported: ROM files will not be loaded.
 
 Sample rate: 48000 Hz
 
@@ -175,6 +189,9 @@ Supported chips (14): OPL2 OPL3 OPN2 OPN2C OPM OPP OPLL OPLL-B OPLLP OPLLP-B OPL
 
 ...
 ```
+
+`FmEngine_GetMemoryCount is not exported` の行は、NukedEngine が外部メモリの関数を持たないことを  
+知らせるもので、エラーではありません。
 
 JSON の `"chips"` オブジェクトのキーがチップ名です。上記の対応チップ一覧にない名前  
 (`"OPNA"`, `"OPL4"` 等) は `FM_ERR_UNKNOWN_CHIP` でスキップされます。
@@ -235,7 +252,7 @@ FmEngine_Destroy(eng);
 | オーディオ出力 | DLL 自体は出力しない（アプリが担当） | **同一** |
 | ソフトクリップ | `FmEngine::generate()` 内で適用 | `FmEngine_Generate()` では**非適用** |
 | 部位ごとのゲイン | OPN 系 / OPLL 系 / OPL3 / OPL4 | OPLL 系 / OPL3 |
-| 外部メモリ (ADPCM/PCM) | ✅ | ❌ (`FM_ERR_UNAVAILABLE`、`FmEngine_SetMemoryEx` は `FM_ERR_INVALID_ARG`) |
+| 外部メモリ (ADPCM/PCM) | ✅ | ❌ (外部メモリの関数を持たない) |
 | 対応チップ数 | 多数 (ymfm 対応チップ全て) | 14 種 (Nuked コアが対応するもののみ) |
 
 ## OPM / OPLL のサンプリング方式について

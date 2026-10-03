@@ -6,6 +6,14 @@ AI 向けの作業メモ。人間向けの文書は `README.md`。
 
 - `docs/CHANGELOG.md` — 開発経緯。方針の前提、見送った案、確認結果を書く
 
+## コミット
+
+- author と committer は `madscient` にする。リポジトリ側（`.git/config`）に `user.name` と
+  `user.email`（GitHub の madscient アカウントに登録したメール）を設定してから commit する。
+  グローバルの設定のまま commit しない
+- commit の前に `git config --show-origin --get user.name` で、名前がリポジトリ側の設定から
+  来ていることを確かめる
+
 ## FmEngineApi への追従
 
 - 仕様は FMEngineTest の `docs/FmEngineApi.md`、ヘッダの正本は同じリポジトリの
